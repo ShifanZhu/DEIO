@@ -123,13 +123,14 @@ What's more, we also give the <a href="./estimated_trajectories/evo_evaluation_t
 
 ## Acknowledgement
 * This work is based on [DPVO](https://github.com/princeton-vl/DPVO), [DEVO](https://github.com/tum-vision/DEVO), [DROID-SLAM](https://github.com/princeton-vl/DROID-SLAM), [DBA-Fusion](https://github.com/GREAT-WHU/DBA-Fusion), and [GTSAM](https://github.com/borglab/gtsam)
-* If you find this work is helpful in your research, a simple star or citation of our works should be the best affirmation for us. :blush: 
+* If you find this work helpful in your research, a simple star or citation of our work should be the best affirmation for us. :blush: 
 
 ~~~
 @inproceedings{GWPHKU:DEIO,
-    title={DEIO: Deep Event Inertial Odometry},
-    author={Guan, Weipeng and Lin, Fuling and Chen, Peiyu and Lu, Peng},
-    booktitle={Proceedings of the IEEE/CVF International Conference on Computer Vision Workshops},
-    year={2025}
-  }
+  title={Deio: Deep event inertial odometry},
+  author={Guan, Weipeng and Lin, Fuling and Chen, Peiyu and Lu, Peng},
+  booktitle={Proceedings of the IEEE/CVF International Conference on Computer Vision},
+  pages={4606--4615},
+  year={2025}
+}
 ~~~
