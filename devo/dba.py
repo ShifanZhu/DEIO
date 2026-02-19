@@ -27,6 +27,17 @@ import devo.geoFunc.trans as trans
 import copy
 import bisect
 
+# Short version: they are three backend levels of complexity.
+
+# devo.py: baseline DEVO visual odometry backend; pure event-visual tracking + local sliding-window BA, no GTSAM IMU fusion.
+# devo2.py: visual backend with stronger graph management (PatchGraph), loop-closure edges, inactive/active factor storage, and optional global BA.
+# dba.py: DEIO backend; everything in visual BA plus visual-inertial fusion using GTSAM (IMU preintegration, bias/velocity states, priors, marginalization, VI initialization/alignment).
+# Key practical differences:
+
+# State representation: devo uses mostly direct tensors; devo2/dba use PatchGraph; dba additionally keeps MultiSensorState (pose/vel/bias/preintegrations).
+# Optimizer stack: devo/devo2 rely on fastba visual optimization; dba builds a factor graph with CombinedImuFactor + visual Hessian factor and optimizes with Levenberg-Marquardt.
+# Initialization: devo/devo2 do visual-only warmup; dba adds Visual-IMU alignment (gyro bias, gravity, scale) before enabling IMU.
+# Runtime update: devo/devo2 process frames visually; dba continuously ingests IMU between frames and runs VIO updates.
 
 def CustomHessianFactor(values: gtsam.Values, H: np.ndarray, v: np.ndarray):
     info_expand = np.zeros([H.shape[0]+1,H.shape[1]+1])

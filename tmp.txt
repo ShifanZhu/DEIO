@@ -1,0 +1,9 @@
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/home/s/repos/DEIO python script/eval_deio/davis240c.py \
+    --inputdir=/home/s/data/eventcam_dataset \
+    --config=config/davis240c.yaml \
+    --val_split=script/splits/davis240c/davis240c_val.txt \
+    --enable_event \
+    --network=/home/s/repos/DEVO/DEVO.pth  \
+    --plot \
+    --save_trajectory \
+    --trials=5

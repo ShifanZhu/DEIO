@@ -1,8 +1,1 @@
-boxes_translation
-hdr_boxes
-boxes_6dof
-dynamic_translation
-dynamic_6dof
-poster_translation
-hdr_poster
-poster_6dof
+shapes_translation

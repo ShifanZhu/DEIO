@@ -6,11 +6,11 @@ import tqdm
 import glob
 import multiprocessing
 
-import rosbags
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 import tqdm as tqdm
 import h5py
+import rosbag
 
 # import sys
 # sys.path.append('/home/gwp/raw_DEVO')
@@ -277,9 +277,10 @@ if __name__ == "__main__":
     roots = []
     for root, dirs, files in os.walk(args.indir):
         for f in files:
-            try:
+            # try:
                 if f.endswith(".bag"):#如果是rosbag文件
                 # if f=="boxes_translation.bag": #debug used
+                    print(f"Processing {f} ......")
                     p = os.path.join(root, f"{f.split('.')[0]}")
                     if p in has_processed_dirs:
                             continue
@@ -294,9 +295,9 @@ if __name__ == "__main__":
                     has_processed_dirs.append(p)
                     with open(record_file, "a") as f:
                         f.write(f"{p}\n")
-            except:
-                print(f"\033[31m Error processing {f} \033[0m")
-                continue
+            # except:
+            #     print(f"\033[31m Error processing {f} \033[0m")
+            #     continue
 
     
     # cors = 4 #3
