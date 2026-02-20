@@ -31,6 +31,12 @@ _C.MOTION_DAMPING = 0.5
 
 _C.MIXED_PRECISION = True
 
+# Optional ResNet backbone for event feature extraction
+_C.resnet = False
+_C.block_dims = [64, 128, 256]
+_C.initial_dim = 64
+_C.pretrain = "resnet18"
+
 # Loop closure
 _C.LOOP_CLOSURE = False
 _C.BACKEND_THRESH = 64.0
