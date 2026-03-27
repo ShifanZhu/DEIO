@@ -10,7 +10,7 @@ import torch
 import quaternion
 import math
 
-# 处理服务器中evo的可视化问题
+# Handle visualization issues with evo on the server
 import evo
 from evo.tools.settings import SETTINGS
 SETTINGS['plot_backend'] = 'Agg'
@@ -20,7 +20,7 @@ from evo.core.metrics import PoseRelation
 from evo.core.trajectory import PoseTrajectory3D
 from evo.tools import file_interface
 
-from devo.config import cfg # 这里的cfg是从devo.config中导入的
+from devo.config import cfg # config file imported
 # from dpvo.utils import Timer
 
 from utils.load_utils import load_gt_us,davis240c_evs_iterator, davis240c_evs_iterator
@@ -29,16 +29,16 @@ from utils.eval_utils import log_results,compute_median_results,VO_run,EVO_run,E
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--inputdir', default="datasets") # 数据集的路径
-    parser.add_argument('--network', type=str, default='dpvo.pth') # 网络的路径
-    parser.add_argument('--val_split', type=str, default="splits") # 验证集的路径,有它来决定验证的序列
+    parser.add_argument('--inputdir', default="datasets") # Path to the dataset
+    parser.add_argument('--network', type=str, default='dpvo.pth') # Path to the network model
+    parser.add_argument('--val_split', type=str, default="splits") # Path to the validation split, which determines the validation sequences
     parser.add_argument('--config', default="config/***.yaml")
     parser.add_argument('--stride', type=int, default=1)
     parser.add_argument('--viz', action="store_true")
-    parser.add_argument('--enable_event', action="store_true")#是否启用事件,启用了后就不会再使用图像了
+    parser.add_argument('--enable_event', action="store_true") # Whether to enable events; if enabled, images will no longer be used
     parser.add_argument('--show_img', action="store_true")
     parser.add_argument('--trials', type=int, default=1)
-    parser.add_argument('--backend_thresh', type=float, default=64.0) # 用于判断是否使用后端优化的阈值，原本为64.0
+    parser.add_argument('--backend_thresh', type=float, default=64.0) # Threshold for determining whether to use backend optimization; originally 64.0
     parser.add_argument('--plot', action="store_true")
     parser.add_argument('--opts', nargs='+', default=[])
     parser.add_argument('--save_trajectory', action="store_true")
@@ -53,29 +53,29 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     cfg.merge_from_file(args.config)
-    # cfg.BACKEND_THRESH = args.backend_thresh # 用于判断是否使用后端优化的阈值，直接通过参数文件传入
+    # cfg.BACKEND_THRESH = args.backend_thresh # Threshold for determining whether to use backend optimization; passed directly via the parameter file
     cfg.merge_from_list(args.opts)
 
-    # 构造覆盖列表，将四个参数映射到cfg的键
-    # 直接将args的参数赋值给cfg的顶层属性
+    # Construct override list, mapping four parameters to cfg keys
+    # Directly assign args parameters to top-level properties of cfg
     cfg.resnet = args.resnet
-    cfg.block_dims = list(map(int, args.block_dims.split(',')))  # 转换为整数列表
+    cfg.block_dims = list(map(int, args.block_dims.split(',')))  # Convert to list of integers
     cfg.initial_dim = args.initial_dim
     cfg.pretrain = args.pretrain
 
     print("\033[42m Running EVO with config...\033[0m ")
     print(cfg, "\n")
 
-    # torch.manual_seed(1234) #反而不利于同时测试多个数据集
+    # torch.manual_seed(1234) # Conversely, it is not conducive to testing multiple datasets simultaneously
 
-    # 目前不要开启cfg.CLASSIC_LOOP_CLOSURE
-    assert not cfg.CLASSIC_LOOP_CLOSURE #cfg.CLASSIC_LOOP_CLOSURE是用传统的方式来进行回环检测，现在不需要，只有相机临近法
+    # Do not enable cfg.CLASSIC_LOOP_CLOSURE for now
+    assert not cfg.CLASSIC_LOOP_CLOSURE # cfg.CLASSIC_LOOP_CLOSURE uses traditional methods for loop closure detection; it is not needed now, only camera proximity method is used
     if cfg.LOOP_CLOSURE:
         print("\033[41m with Global BA \033[0m ")
     else:
         print("\033[41m no Global BA \033[0m ")
 
-    # 读取场景的名称    
+    # Read the names of the scenes    
     test_scenes = open(args.val_split).read().split()
     print("the number of scenes is", len(test_scenes),"the input scenes are: ", test_scenes)
 
@@ -86,10 +86,10 @@ if __name__ == '__main__':
         dataset_name += "/VO"
     
     if cfg.LOOP_CLOSURE:
-        dataset_name += "_GBA"#如果开启了回环检测，就加上_GBA
+        dataset_name += "_GBA" # If loop closure detection is enabled, append _GBA
     
     if cfg.ENALBE_IMU:
-        dataset_name += "_IMU"#如果还开启了IMU，就加上_IMU
+        dataset_name += "_IMU" # If IMU is also enabled, append _IMU
 
     results_dict_scene, figures = {}, {}
     all_results = []
@@ -97,65 +97,65 @@ if __name__ == '__main__':
         print(f"Eval on {scene}")
         results_dict_scene[scene] = []
 
-        groundtruth = os.path.join(args.inputdir, scene, f"gt_stamped_left.txt")#真值的路径，注意这是有时间偏移的真值
-        imupath = os.path.join(args.inputdir, scene, f"imu_data.csv")#IMU的路径
+        groundtruth = os.path.join(args.inputdir, scene, f"gt_stamped_left.txt") # Path to ground truth; note that this ground truth has a time offset
+        imupath = os.path.join(args.inputdir, scene, f"imu_data.csv") # Path to IMU data
 
         for trial in range(args.trials):
             print(f"\nRunning trial {trial} of {scene}...")
             
-            # 运行dpvo主程序
+            # Run the DPVO main program
             if not args.enable_event:
                 print("This code is for event rather than image")
                 raise NotImplementedError
 
             datapath_val = os.path.join(args.inputdir, scene)
-            # load  traj（这应该是获取gt trajectory的值,从txt文件中读取）
-            tss_traj_us, traj_hf = load_gt_us(groundtruth)#提前获取真值的时间戳和位置
+            # load traj (this should be getting the GT trajectory values, read from the txt file)
+            tss_traj_us, traj_hf = load_gt_us(groundtruth) # Pre-fetch ground truth timestamps and positions
 
-            if cfg.LOOP_CLOSURE and not cfg.ENALBE_IMU:#如果开启了回环检测，但是没有开启IMU
+            if cfg.LOOP_CLOSURE and not cfg.ENALBE_IMU: # If loop closure detection is enabled but IMU is not
                 # traj_est, tstamps, flowdata, avg_fps = EVO_run_GBA(datapath_val, cfg, args.network, viz=args.viz, 
                 #                         iterator=davis240c_evs_iterator(datapath_val, side=args.side, stride=args.stride, timing=False, H=180, W=240),
                 #                         timing=args.timing, H=180, W=240, viz_flow=False)
                 raise NotImplementedError("No IMU, please check the config file")
-            # elif cfg.LOOP_CLOSURE and cfg.ENALBE_IMU:#如果开启了回环检测，同时开启了IMU
-            elif cfg.ENALBE_IMU:#如果开启了IMU （有无回环都可以运行这个）
+            # elif cfg.LOOP_CLOSURE and cfg.ENALBE_IMU: # If loop closure detection is enabled and IMU is also enabled
+            elif cfg.ENALBE_IMU: # If IMU is enabled (can run with or without loop closure)
                 """ Load GT trajectory (for visualization and VI intilization) """
-                # all_gt_keys=tss_traj_us #所有真值的时间戳
-                # #all_gt为所有的真值的时间戳（tss_traj_us）+位姿（traj_hf）
+                # all_gt_keys=tss_traj_us # Timestamps for all ground truth
+                # #all_gt is timestamps (tss_traj_us) + poses (traj_hf) for all ground truth
                 # all_gt = np.concatenate((all_gt_keys, traj_hf), axis=1)
-                all_gt = {}#存真值的 时间戳+位姿
-                # 遍历每个时间戳和对应的轨迹数据
+                all_gt = {} # Stores timestamps + poses of ground truth
+                # Iterate through each timestamp and corresponding trajectory data
                 for sod, data in zip(tss_traj_us, traj_hf):
-                    # sod是时间戳，为us，将us转换为秒
+                    # sod is the timestamp in us; convert us to seconds
                     sod = float(sod / 1e6)
-                    if sod not in all_gt:# 如果 sod 不在 all_gt 中，初始化一个空字典
+                    if sod not in all_gt: # If sod is not in all_gt, initialize an empty dictionary
                         all_gt[sod] = {}
                     
-                    # 提取位置 (x, y, z)
+                    # Extract position (x, y, z)
                     x = data[0]
                     y = data[1]
                     z = data[2]
                     
-                    # 提取四元数分量 (qx, qy, qz, qw)，注意GT就是这样存的
-                    # 注意：根据实际数据中的四元数顺序调整索引
+                    # Extract quaternion components (qx, qy, qz, qw); note that GT is stored this way
+                    # Note: Adjust indices according to the actual quaternion order in the data
                     qx = data[3]
                     qy = data[4]
                     qz = data[5]
                     qw = data[6]
                     
-                    # 构造四元数对象并转换为旋转矩阵
-                    q = quaternion.from_float_array([float(qw), float(qx), float(qy), float(qz)])  # 注意四元数顺序是否为 (w, x, y, z)
+                    # Construct quaternion object and convert to rotation matrix
+                    q = quaternion.from_float_array([float(qw), float(qx), float(qy), float(qz)])  # Note whether the quaternion order is (w, x, y, z)
                     R = quaternion.as_rotation_matrix(q)
                     
-                    # 构造 4x4 变换矩阵
+                    # Construct 4x4 transformation matrix
                     TTT = np.eye(4)
                     TTT[0:3, 0:3] = R
                     TTT[0:3, 3] = [float(x), float(y), float(z)]
                     
                     all_gt[sod]['T'] = TTT
 
-                # 对时间戳进行排序*(注意这是有时间偏移的真值)
-                all_gt_keys = sorted(all_gt.keys())#存存真值的时间戳，注意这里是秒
+                # Sort timestamps * (note that this ground truth has a time offset)
+                all_gt_keys = sorted(all_gt.keys()) # Store ground truth timestamps; note this is in seconds
                 assert np.all(all_gt_keys==tss_traj_us / 1e6)
 
                 # t_offset_us = np.loadtxt(os.path.join(args.inputdir, scene, "t0_us.txt"))#读取时间偏移量

@@ -330,8 +330,16 @@ class DBA:
                 self.viewer.join()
         else:
             # self.poses_save 中获取tstamps和poses，self.poses_save每一行的第一个是时间，其余七个是pose
-            poses = np.array(self.poses_save)[:, 1:]
-            tstamps = np.array(self.poses_save, dtype=np.float64)[:, 0]#获取时间戳
+            if len(self.poses_save) == 0:
+                print("[WARNING] poses_save is empty — VI may not have initialized. "
+                      "Falling back to slam window poses.")
+                poses = [self.get_pose(t) for t in range(self.counter)]
+                poses = lietorch.stack(poses, dim=0)
+                poses = poses.inv().data.cpu().numpy()
+                tstamps = np.array(self.tlist, dtype=np.float64)
+            else:
+                poses = np.array(self.poses_save)[:, 1:]
+                tstamps = np.array(self.poses_save, dtype=np.float64)[:, 0]#获取时间戳
 
         return poses, tstamps
     

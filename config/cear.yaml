@@ -1,0 +1,50 @@
+### CEAR Dataset Config ###
+# DVXplorer Lite 320x240 event camera
+
+# VO config
+PATCHES_PER_FRAME: 96
+REMOVAL_WINDOW: 22
+OPTIMIZATION_WINDOW: 10
+PATCH_LIFETIME: 13
+
+# threshold for keyframe removal
+KEYFRAME_THRESH: 15.0
+
+# camera motion model
+MOTION_MODEL: 'DAMPED_LINEAR'
+MOTION_DAMPING: 0.5
+
+# maybe use mixed precision for inference
+MIXED_PRECISION: True
+
+# Select between random, gradient, scorer
+PATCH_SELECTOR: 'scorer'
+# Normalizer (only evs): none, rescale, standard (std)
+NORM: 'std'
+# Eval mode of patch selector (3xrandom, topk, multinomial)
+SCORER_EVAL_MODE: 'multi'
+SCORER_EVAL_USE_GRID: True
+
+# For proximity loop closure
+LOOP_CLOSURE: True
+BACKEND_THRESH: 64.0
+MAX_EDGE_AGE: 1000
+GLOBAL_OPT_FREQ: 15
+
+# For IMU integration
+# Ti1c = T_event_imu (maps a point in IMU frame → event camera frame).
+# ENALBE_INV: True tells the code to invert it, yielding Tbc = T_imu_event.
+# Values from deep_event_odometry/config/cear_config.yaml calibration.T_event_imu.
+# load_imu_h5 reads imu/data_raw (raw IMU sensor frame), so this rotation is needed.
+ENALBE_IMU: True
+Ti1c: [0.0498283643378771, 0.998742115520674, -0.00559649825349318, 0.00245211438307508,
+       0.00399768782977855, 0.00540397114055624, 0.999977407538754, -0.0358746175505029,
+       0.998749794793184, -0.0498496116454443, -0.00372338815744144, -0.0629354943337337,
+       0.0, 0.0, 0.0, 1.0]
+ENALBE_INV: True  # input above is T_event_imu (IMU→cam); code inverts to get Tbc
+accel_noise_sigma: 2.0000e-3
+gyro_noise_sigma: 1.6968e-04
+accel_bias_sigma: 3.0000e-3
+gyro_bias_sigma: 1.9393e-05
+
+CLASSIC_LOOP_CLOSURE: False

@@ -1,0 +1,51 @@
+### MVSEC Dataset Config ###
+# DAVIS346 346x260 event camera with fisheye lens (indoor_flying sequences)
+
+# VO config
+PATCHES_PER_FRAME: 96
+REMOVAL_WINDOW: 22
+OPTIMIZATION_WINDOW: 10
+PATCH_LIFETIME: 13
+
+# threshold for keyframe removal
+KEYFRAME_THRESH: 15.0
+
+# camera motion model
+MOTION_MODEL: 'DAMPED_LINEAR'
+MOTION_DAMPING: 0.5
+
+# maybe use mixed precision for inference
+MIXED_PRECISION: True
+
+# Select between random, gradient, scorer
+PATCH_SELECTOR: 'scorer'
+# Normalizer (only evs): none, rescale, standard (std)
+NORM: 'std'
+# Eval mode of patch selector (3xrandom, topk, multinomial)
+SCORER_EVAL_MODE: 'multi'
+SCORER_EVAL_USE_GRID: True
+
+# For proximity loop closure
+LOOP_CLOSURE: True
+BACKEND_THRESH: 64.0
+MAX_EDGE_AGE: 1000
+GLOBAL_OPT_FREQ: 15
+
+# For IMU integration
+# Ti1c = T_event_imu (maps a point in IMU frame → event camera frame).
+# ENALBE_INV: True tells the code to invert it, yielding Tbc = T_imu_event.
+# Source: camchain-imucam-indoor_flying.yaml (cam0 block), stored in H5 meta/T_event_imu.
+ENALBE_IMU: True
+Ti1c: [ 0.99987719, -0.01512840, -0.00409108, -0.00276073,
+        0.01508169,  0.99982333, -0.01121799, -0.00165210,
+        0.00426006,  0.01115491,  0.99992871, -0.01782949,
+        0.0,         0.0,         0.0,          1.0]
+
+ENALBE_INV: True  # input above is T_event_imu (event←imu); code inverts to get Tbc
+
+# IMU noise parameters (MPU-6000 inside DAVIS; values from standard DAVIS calibration)
+accel_noise_sigma: 2.0000e-3
+gyro_noise_sigma: 1.6968e-04
+accel_bias_sigma: 3.0000e-3
+gyro_bias_sigma: 1.9393e-05
+
