@@ -98,9 +98,11 @@ def train(rank, args):
     if args.ddp:#采用多GPU训练
         train_sampler = torch.utils.data.distributed.DistributedSampler(
             db, shuffle=True, num_replicas=args.gpu_num, rank=rank)
-        train_loader = DataLoader(db, batch_size=args.batch, sampler=train_sampler, num_workers=4)
+        train_loader = DataLoader(db, batch_size=args.batch, sampler=train_sampler,
+                                  num_workers=args.num_workers, pin_memory=True, prefetch_factor=4)
     else:
-        train_loader = DataLoader(db, batch_size=args.batch, shuffle=True, num_workers=4)
+        train_loader = DataLoader(db, batch_size=args.batch, shuffle=True,
+                                  num_workers=args.num_workers, pin_memory=True, prefetch_factor=4)
 
     # Initial VOnet
     kwargs_net = {"dim_inet": args.dim_inet, "dim_fnet": args.dim_fnet, "dim": args.dim}
@@ -115,8 +117,9 @@ def train(rank, args):
         net = DDP(net, device_ids=[rank], find_unused_parameters=False)
 
     optimizer = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-6)#AdamW优化器
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, 
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer,
         args.lr, args.steps, pct_start=0.01, cycle_momentum=False, anneal_strategy='linear')
+    scaler = torch.amp.GradScaler('cuda', enabled=args.amp)
     
     total_steps = 0
 
@@ -167,13 +170,14 @@ def train(rank, args):
             for data_blob in train_loader:
                 scene_id = data_blob.pop()
                 images, poses, disps, intrinsics = [x.cuda().float() for x in data_blob] # images: (B,n_frames,C,H,W), poses: (B,n_frames,7), disps: (B,n_frames,H,W) (all float32)
-                optimizer.zero_grad() # TODO set_to_none=True
+                optimizer.zero_grad(set_to_none=True)
 
                 # fix poses to gt for first 1k steps
                 so = total_steps < (1000 // args.gpu_num) and (args.checkpoint is None or args.checkpoint == "")
 
                 poses = SE3(poses).inv() # [simon]: this does c2w -> w2c (which dpvo predicts&stores internally),此处应该是真值的pose
-                traj = net(images, poses, disps, intrinsics, M=1024, STEPS=args.iters, structure_only=so, plot_patches=DEBUG_PLOT_PATCHES, patches_per_image=args.patches_per_image)
+                with torch.amp.autocast('cuda', enabled=args.amp, dtype=torch.bfloat16):
+                    traj = net(images, poses, disps, intrinsics, M=1024, STEPS=args.iters, structure_only=so, plot_patches=DEBUG_PLOT_PATCHES, patches_per_image=args.patches_per_image)
                 # list [valid, p_ij, p_ij_gt, poses, poses_gt, kl] of iters (update operator)
                 if DEBUG_PLOT_PATCHES:
                     patch_data = traj.pop()
@@ -255,11 +259,12 @@ def train(rank, args):
                 
                 if torch.isnan(loss):
                     print(f"nan at {total_steps}: {scene_id}")
-                
-                loss.backward()#反向传播
 
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(net.parameters(), args.clip)
-                optimizer.step()   
+                scaler.step(optimizer)
+                scaler.update()
                 scheduler.step()
 
                 total_steps += 1
@@ -386,6 +391,8 @@ if __name__ == '__main__':
     parser.add_argument('--gpu_num', type=int, default=1, help='distributed over more gpus')
     parser.add_argument('--port', default="12348", help='free port for master node')
     parser.add_argument('--profiler', action='store_true', help='enable autograd profiler')
+    parser.add_argument('--amp', action='store_true', help='enable automatic mixed precision (bfloat16)')
+    parser.add_argument('--num_workers', type=int, default=4, help='dataloader worker processes')
     parser.add_argument('--scale', type=float, default=1.0, help='reduce computation')
     parser.add_argument('--dim_inet', type=int, default=384, help='channel dimension of hidden state')
     parser.add_argument('--dim_fnet', type=int, default=128, help='channel dimension of last layer fnet')

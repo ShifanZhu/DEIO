@@ -44,10 +44,10 @@ def evaluate(config, args, net, train_step=None, datapath="", split_file=None,
             # estimated trajectory
             parts = scene.split("/")
             if len(parts) == 3:
-                # nested: scene/difficulty/seqnum  -> datapath/scene/seqnum/evs_left/scene/difficulty/seqnum/h5
-                datapath_val = os.path.join(datapath, parts[0], parts[2])
-                scene_path = os.path.join(datapath_val, "evs_left", scene, "h5")
-                traj_ref = osp.join(datapath_val, "image_left", scene, "pose_left.txt")
+                # 3-level: scene/difficulty/seqnum -> datapath/scene/difficulty/seqnum/evs_left/h5
+                datapath_val = os.path.join(datapath, *parts)
+                scene_path = os.path.join(datapath_val, "evs_left", "h5")
+                traj_ref = osp.join(datapath_val, "pose_left.txt")
             else:
                 # flat: seqname -> datapath/seqname/evs_left/h5
                 datapath_val = os.path.join(datapath, scene)
@@ -68,10 +68,9 @@ def evaluate(config, args, net, train_step=None, datapath="", split_file=None,
             if scale != 1.0:
                 traj_ref = transform_rescale_poses(scale, torch.from_numpy(traj_ref)).data.numpy()
 
-            FREQ = 50
-            # do evaluation 
-            data = (traj_ref, tstamps*1e6/FREQ, traj_est, tstamps*1e6/FREQ)
-            data = (traj_ref, tstamps, traj_est, tstamps)
+            # tstamps are keyframe indices into traj_ref — subsample GT to match
+            traj_ref_kf = traj_ref[tstamps.astype(int)]
+            data = (traj_ref_kf, tstamps, traj_est, tstamps)
             hyperparam = (train_step, net, dataset_name, scene, trial, cfg, args)
             all_results, results_dict_scene, figures, outfolder = log_results(data, hyperparam, all_results, results_dict_scene, figures, 
                                                                    plot=plot, save=save, return_figure=return_figure, rpg_eval=rpg_eval, stride=stride,

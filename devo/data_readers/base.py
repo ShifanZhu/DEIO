@@ -51,7 +51,8 @@ class RGBDDataset(data.Dataset):
             scene_info = self._build_dataset()
             save_scene_info(scene_info, name)
         else:
-            scene_info = pickle.load(open(fgraph_pickle, 'rb'))[0]
+            data = pickle.load(open(fgraph_pickle, 'rb'))
+            scene_info = data[0] if isinstance(data, tuple) else data
             if not seqs_in_scene_info(self.train_split, scene_info):
                 print(f"Loaded scene_info {fgraph_pickle} does NOT contain all requested scenes. Rebuilding dataset...")
                 scene_info = self._build_dataset()
@@ -232,9 +233,16 @@ class EVSDDataset(data.Dataset):
             scene_info = self._build_dataset()
             save_scene_info(scene_info, name)
         else:
-            scene_info = pickle.load(open(fgraph_pickle, 'rb'))[0]
-            if not seqs_in_scene_info(self.train_split, scene_info):
-                print(f"Loaded scene_info {fgraph_pickle} does NOT contain all requested scenes. Rebuilding dataset...")
+            data = pickle.load(open(fgraph_pickle, 'rb'))
+            scene_info = data[0] if isinstance(data, tuple) else data
+            # check format: EVSDDataset needs 'voxels' key
+            sample = next(iter(scene_info.values())) if scene_info else {}
+            wrong_format = scene_info and 'voxels' not in sample
+            if wrong_format or not seqs_in_scene_info(self.train_split, scene_info):
+                if wrong_format:
+                    print(f"Loaded scene_info {fgraph_pickle} has incompatible format. Rebuilding dataset...")
+                else:
+                    print(f"Loaded scene_info {fgraph_pickle} does NOT contain all requested scenes. Rebuilding dataset...")
                 scene_info = self._build_dataset()
                 save_scene_info(scene_info, name)
 

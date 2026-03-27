@@ -12,7 +12,8 @@ from .enet import eVONet
 from .utils import *
 from . import projective_ops as pops
 
-autocast = torch.cuda.amp.autocast
+from functools import partial
+autocast = partial(torch.amp.autocast, 'cuda')
 Id = SE3.Identity(1, device="cuda")
 
 from utils.viz_utils import visualize_voxel

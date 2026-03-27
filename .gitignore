@@ -19,3 +19,5 @@ weight/*
 
 thirdparty
 runs
+logs
+*.pickle

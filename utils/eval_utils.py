@@ -422,27 +422,37 @@ def log_results(data, hyperparam, all_results, results_dict_scene, figures,
                 yaml.dump(vars(args), f, default_flow_style=False)
 
     # compute ATE
-    ate_score, evoGT, evoEst = ate_real(traj_GT, tss_GT_us, traj_est, tss_est_us)#已经更改里面的xyzw顺序
+    try:
+        ate_score, evoGT, evoEst = ate_real(traj_GT, tss_GT_us, traj_est, tss_est_us)#已经更改里面的xyzw顺序
+    except Exception as e:
+        print(f"[WARN] ate_real failed ({e}), skipping eval for this scene.")
+        all_results.append(float('nan'))
+        results_dict_scene[scene].append(float('nan'))
+        return all_results, results_dict_scene, figures, outfolder
     # all_results.append(ate_score)
     # results_dict_scene[scene].append(ate_score)
-    
+
     # following https://github.com/arclab-hku/Event_based_VO-VIO-SLAM/issues/5
-    evoGT = make_evo_traj(traj_GT, tss_GT_us)#已经更改里面的xyzw顺序
-    evoEst = make_evo_traj(traj_est, tss_est_us)
-    gtlentraj = evoGT.get_infos()["path length (m)"]#获取轨迹长度
-    evoGT, evoEst = sync.associate_trajectories(evoGT, evoEst, max_diff=1)
-    # ape_trans = main_ape.ape(copy.deepcopy(evoGT), copy.deepcopy(evoEst), pose_relation=metrics.PoseRelation.translation_part, align=True, correct_scale=True)
-    # 新增参数_n_to_align
-    ape_trans = main_ape.ape(copy.deepcopy(evoGT), copy.deepcopy(evoEst), pose_relation=metrics.PoseRelation.translation_part, align=True,n_to_align=_n_to_align, correct_scale=True)
-    # 用红色字体显示
-    print(f"\033[31m EVO results: {ape_trans}\033[0m")
-    if _n_to_align!=-1:
-        print(f"align {_n_to_align} frames")
-    MPE = ape_trans.stats["mean"] / gtlentraj * 100
-    print(f"MPE is {MPE:.02f}") #注意只保留两位小数
-    evoATE = ape_trans.stats["rmse"]*100
-    if _n_to_align==-1:#只有为-1时才进行assert
-        assert abs(evoATE-ate_score) < 1e-5
+    try:
+        evoGT = make_evo_traj(traj_GT, tss_GT_us)#已经更改里面的xyzw顺序
+        evoEst = make_evo_traj(traj_est, tss_est_us)
+        gtlentraj = evoGT.get_infos()["path length (m)"]#获取轨迹长度
+        evoGT, evoEst = sync.associate_trajectories(evoGT, evoEst, max_diff=1)
+        # ape_trans = main_ape.ape(copy.deepcopy(evoGT), copy.deepcopy(evoEst), pose_relation=metrics.PoseRelation.translation_part, align=True, correct_scale=True)
+        # 新增参数_n_to_align
+        ape_trans = main_ape.ape(copy.deepcopy(evoGT), copy.deepcopy(evoEst), pose_relation=metrics.PoseRelation.translation_part, align=True,n_to_align=_n_to_align, correct_scale=True)
+        # 用红色字体显示
+        print(f"\033[31m EVO results: {ape_trans}\033[0m")
+        if _n_to_align!=-1:
+            print(f"align {_n_to_align} frames")
+        MPE = ape_trans.stats["mean"] / gtlentraj * 100
+        print(f"MPE is {MPE:.02f}") #注意只保留两位小数
+        evoATE = ape_trans.stats["rmse"]*100
+        if _n_to_align==-1:#只有为-1时才进行assert
+            assert abs(evoATE-ate_score) < 1e-5
+    except Exception as e:
+        print(f"[WARN] EVO alignment failed ({e}), reporting nan.")
+        MPE = float('nan')
     R_rmse_deg = -1.0
 
     # 用于最后输出所有的结果

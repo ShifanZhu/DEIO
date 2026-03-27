@@ -183,6 +183,37 @@ class TartanAirEVS(EVSDDataset):
                 'poses': poses, 'intrinsics': intrinsics, 'graph': graph}
             print(f"Added {scene} to TartanAir EVDS dataset")
 
+        # --- 3-level structure: root/scene/difficulty/seqnum/evs_left ---
+        three_level_evs = glob.glob(osp.join(self.root, '*/*/*/evs_left'))
+
+        for evs_dir in tqdm(sorted(three_level_evs)):
+            seq_dir = osp.dirname(evs_dir)
+
+            if not scene_in_split(seq_dir, self.train_split):
+                continue
+
+            voxels = sorted(glob.glob(osp.join(evs_dir, 'h5/*.h5')))
+            if not voxels:
+                continue
+
+            depths = sorted(glob.glob(osp.join(seq_dir, 'depth_left/*.npy')))[1:]
+            if len(voxels) != len(depths):
+                print(f"Skipping {seq_dir}: voxel/depth count mismatch ({len(voxels)} vs {len(depths)})")
+                continue
+
+            poses = np.loadtxt(osp.join(seq_dir, 'pose_left.txt'))[1:]
+            poses = poses[:, [1, 2, 0, 4, 5, 3, 6]]
+            poses[:, :3] /= TartanAirEVS.DEPTH_SCALE
+            intrinsics = [TartanAirEVS.calib_read()] * len(voxels)
+            if poses.shape[0] != len(voxels):
+                print(f"Skipping {seq_dir}: pose/voxel count mismatch ({poses.shape[0]} vs {len(voxels)})")
+                continue
+
+            graph = self.build_frame_graph(poses, depths, intrinsics)
+            scene_info[evs_dir] = {'voxels': voxels, 'depths': depths,
+                'poses': poses, 'intrinsics': intrinsics, 'graph': graph}
+            print(f"Added {evs_dir} to TartanAir EVDS dataset")
+
         # --- flat structure: root/seqname/evs_left (single-level sample sequences) ---
         flat_evs = glob.glob(osp.join(self.root, '*/evs_left'))
 

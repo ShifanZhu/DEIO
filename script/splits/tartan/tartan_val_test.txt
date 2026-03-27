@@ -1,1 +1,3 @@
-P001
+ocean/Easy/P001
+ocean/Hard/P001
+office2/Hard/P001
