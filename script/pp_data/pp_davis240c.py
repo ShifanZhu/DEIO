@@ -6,7 +6,7 @@ import tqdm
 import glob
 import multiprocessing
 
-import rosbags
+import rosbag
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 import tqdm as tqdm

@@ -1,5 +1,5 @@
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/home/s/repos/DEIO python script/eval_deio/davis240c.py \
-    --inputdir=/home/s/data/eventcam_dataset \
+    --inputdir=/home/s/data/eventcam_dataset/ \
     --config=config/davis240c.yaml \
     --val_split=script/splits/davis240c/davis240c_val.txt \
     --enable_event \
@@ -7,3 +7,39 @@ CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/home/s/repos/DEIO python script/eval_deio/dav
     --plot \
     --save_trajectory \
     --trials=5
+
+
+export PYTHONPATH=/home/s/repos/DEIO
+
+PYTHONPATH=/home/s/repos/DEIO:/opt/ros/humble/local/lib/python3.10/dist-packages python script/pp_data/pp_davis240c.py
+
+PYTHONPATH=/home/s/repos/DEIO python script/pp_data/pp_davis240c.py --indir ~/data/eventcam_dataset/shapes_rotation/
+
+● Here's a summary of all the fixes:                                                                                  
+                 
+  1. Upgraded PyTorch to support RTX 5090 (Blackwell)                                                                 
+                                                                                                                      
+  Your RTX 5090 has compute capability sm_120 which requires CUDA 12.8+. Installed PyTorch nightly with cu128:        
+  pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
+
+  2. Fixed deprecated PyTorch API in CUDA kernels
+
+  Changed .type() to .scalar_type() in three files to fix compilation errors with the new PyTorch:
+  - /home/s/repos/DEIO/dpvo/altcorr/correlation_kernel.cu (4 occurrences)
+  - /home/s/repos/DEIO/dpvo/lietorch/src/lietorch_gpu.cu (19 occurrences)
+  - /home/s/repos/DEIO/dpvo/lietorch/src/lietorch_cpu.cpp (19 occurrences)
+
+  3. Rebuilt CUDA extensions
+
+  python setup.py build_ext --inplace
+
+  4. Reinstalled torch_scatter
+
+  It was compiled for old PyTorch, so rebuilt it:
+  pip install torch_scatter --no-build-isolation
+
+  5. Fixed model loading security change
+
+  PyTorch 2.6+ changed weights_only default to True. Modified /home/s/repos/DEIO/devo/dba.py line 212:
+  checkpoint = torch.load(network, weights_only=False)
+

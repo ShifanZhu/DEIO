@@ -108,7 +108,7 @@ class DEVO:
         # load network from checkpoint file
         if isinstance(network, str):
             print(f"Loading from {network}")
-            checkpoint = torch.load(network)
+            checkpoint = torch.load(network, weights_only=False)
             # TODO infer dim_inet=self.dim_inet, dim_fnet=self.dim_fnet, dim=self.dim
             self.network = eVONet(self.args,dim_inet=self.dim_inet, dim_fnet=self.dim_fnet, dim=self.dim, patch_selector=self.cfg.PATCH_SELECTOR)
             if 'model_state_dict' in checkpoint:
