@@ -1,0 +1,44 @@
+### VECtor Dataset Config ###
+# Prophesee Gen3 event camera, 640x480
+# Large-angle extrinsic between camera and IMU (~90° rotation)
+
+# VO config
+PATCHES_PER_FRAME: 96
+REMOVAL_WINDOW: 22
+OPTIMIZATION_WINDOW: 10
+PATCH_LIFETIME: 13
+
+KEYFRAME_THRESH: 15.0
+
+MOTION_MODEL: 'DAMPED_LINEAR'
+MOTION_DAMPING: 0.5
+
+MIXED_PRECISION: True
+
+PATCH_SELECTOR: 'scorer'
+NORM: 'std'
+SCORER_EVAL_MODE: 'multi'
+SCORER_EVAL_USE_GRID: True
+
+LOOP_CLOSURE: True
+BACKEND_THRESH: 64.0
+MAX_EDGE_AGE: 1000
+GLOBAL_OPT_FREQ: 15
+
+# For IMU integration
+# Ti1c = T_event_imu (maps IMU frame → event camera frame), large rotation (~90°).
+# Source: stored in H5 meta/T_event_imu; derived from VECtor calibration page.
+# ENALBE_INV: True → code inverts to T_imu_event for internal use.
+ENALBE_IMU: True
+Ti1c: [ 0.01120354, -0.99976045,  0.01880224,  0.07737189,
+        0.02184410, -0.01855423, -0.99958920,  0.02372785,
+        0.99969861,  0.01160966,  0.02163100, -0.13049913,
+        0.0,         0.0,         0.0,          1.0]
+ENALBE_INV: True  # input is T_event_imu (IMU→cam); code inverts to get Tbc
+
+accel_noise_sigma: 2.0000e-3
+gyro_noise_sigma: 1.6968e-04
+accel_bias_sigma: 3.0000e-3
+gyro_bias_sigma: 1.9393e-05
+
+CLASSIC_LOOP_CLOSURE: False

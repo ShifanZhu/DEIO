@@ -1668,10 +1668,380 @@ def get_calib_fpv(indir):
                               [ 0.0, 0.0, 0.0, 1.0]])
     else:
         raise NotImplementedError(f"Unknown sequence {indir}")
-    
+
     Kout = np.eye(3)
     Kout[0, 0] = K[0]
     Kout[1, 1] = K[1]
     Kout[0, 2] = K[2]
     Kout[1, 2] = K[3]
     return Kout, D, T_cam_imu
+
+
+def cear_h5_iterator(h5_path, stride=1, H=240, W=320, skip_start_s=0.0):
+    """Iterator for CEAR using the preprocessed H5 from deep_event_odometry pipeline.
+
+    H5 layout:
+      events/t_us         (N,)        event timestamps in µs
+      events/x, y         (N,)        pixel coords (float16)
+      events/p            (N,)        polarities (int8, 0/1)
+      events/slices_index (F,)        start index in events for frame i
+      frames/depth_t_us   (F,)        frame timestamps in µs
+      meta/K_event        (3,3)       original camera matrix
+      meta/K_event_undist (3,3)       undistorted camera matrix
+      meta/D_event        (5,)        distortion coefficients
+      imu/t_us            (M,)        IMU timestamps in µs
+      imu/data_raw        (M,6)       [gx gy gz ax ay az] in IMU sensor frame (rad/s, m/s²)
+    """
+    import h5py
+
+    f = h5py.File(h5_path, 'r')
+
+    # ── Intrinsics & undistortion map ──────────────────────────────────────
+    K_orig  = f['meta/K_event'][:].astype(np.float32)
+    K_undist = f['meta/K_event_undist'][:].astype(np.float32)
+    D       = f['meta/D_event'][:].astype(np.float32)
+
+    term_criteria = (cv2.TERM_CRITERIA_MAX_ITER | cv2.TERM_CRITERIA_EPS, 100, 0.001)
+    coords = np.stack(np.meshgrid(np.arange(W), np.arange(H))).reshape((2, -1)).astype("float32")
+    points = cv2.undistortPointsIter(coords, K_orig, D, np.eye(3), K_undist, criteria=term_criteria)
+    rectify_map = points.reshape((H, W, 2))
+
+    intrinsics = torch.as_tensor([K_undist[0,0], K_undist[1,1], K_undist[0,2], K_undist[1,2]])
+
+    # ── Events ────────────────────────────────────────────────────────────
+    evs_t   = f['events/t_us'][:]                    # µs, int64
+    evs_x   = f['events/x'][:].astype(np.float32)   # float16 → float32
+    evs_y   = f['events/y'][:].astype(np.float32)
+    evs_p   = f['events/p'][:].astype(np.int8)
+    slices  = f['events/slices_index'][:]            # (F,) start indices per frame
+    tss_us  = f['frames/depth_t_us'][:]              # (F,) frame timestamps µs
+
+    f.close()
+
+    n_windows = len(slices) - 1   # events for window i: evs[slices[i]:slices[i+1]]
+
+    data_list = []
+    for i in range(0, n_windows, stride):
+        i0, i1 = int(slices[i]), int(slices[i + 1])
+        if i0 == i1:
+            continue
+
+        xi = np.clip(evs_x[i0:i1].astype(np.int32), 0, W - 1)
+        yi = np.clip(evs_y[i0:i1].astype(np.int32), 0, H - 1)
+        rect = rectify_map[yi, xi]
+
+        voxel = to_voxel_grid(rect[..., 0], rect[..., 1],
+                              evs_t[i0:i1].astype(np.float64),
+                              evs_p[i0:i1],
+                              H=H, W=W, nb_of_time_bins=5)
+        ts_out = float(tss_us[i])
+        data_list.append((voxel, intrinsics.clone(), ts_out))
+
+    if skip_start_s > 0.0 and data_list:
+        t0_us = data_list[0][2]
+        data_list = [(v, intr, t) for (v, intr, t) in data_list
+                     if t - t0_us >= skip_start_s * 1e6]
+        print(f"Skipped first {skip_start_s}s — {len(data_list)} voxels remaining")
+
+    print(f"Preloaded {len(data_list)} CEAR-H5 voxels from {h5_path}")
+
+    for (voxel, intr, ts_us_out) in data_list:
+        yield voxel.pin_memory().cuda(non_blocking=True), intr.cuda(), ts_us_out
+
+
+def cear_evs_iterator(scenedir, stride=1, timing=False, dT_ms=None, H=240, W=320):
+    """Iterator for CEAR dataset (DVXplorer Lite 320x240).
+
+    Expects per-sequence directory with:
+      events.txt          -- space-separated: ts_us x y polarity  (timestamps in microseconds)
+      rgb/{ts_us}_rgb.png -- RGB frames; filenames encode timestamps in microseconds
+      vectornav.txt       -- IMU (timestamps in microseconds)
+    """
+    import pandas as pd
+
+    if timing:
+        t0_ev = torch.cuda.Event(enable_timing=True)
+        t1_ev = torch.cuda.Event(enable_timing=True)
+        t0_ev.record()
+
+    # ── Intrinsics & undistortion map ──────────────────────────────────────
+    fx, fy = 270.02944359462646, 267.85844044621354
+    cx, cy = 142.0589965458161,  116.29740759541482
+    dist_coeffs = np.array([-0.39334604502583076, 0.17215752932640968,
+                             0.00045589492638387243, -0.0007602650238944599, 0.0],
+                           dtype=np.float32)
+    K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
+
+    K_new, _ = cv2.getOptimalNewCameraMatrix(K, dist_coeffs, (W, H), alpha=0, newImgSize=(W, H))
+    term_criteria = (cv2.TERM_CRITERIA_MAX_ITER | cv2.TERM_CRITERIA_EPS, 100, 0.001)
+    coords = np.stack(np.meshgrid(np.arange(W), np.arange(H))).reshape((2, -1)).astype("float32")
+    points = cv2.undistortPointsIter(coords, K, dist_coeffs, np.eye(3), K_new, criteria=term_criteria)
+    rectify_map = points.reshape((H, W, 2))
+
+    intrinsics = torch.as_tensor([K_new[0, 0], K_new[1, 1], K_new[0, 2], K_new[1, 2]])
+
+    # ── Image timestamps from RGB filenames (already in microseconds) ──────
+    rgb_files = sorted(glob.glob(os.path.join(scenedir, "rgb", "*_rgb.png")))
+    assert len(rgb_files) > 0, f"No RGB files found in {scenedir}/rgb/"
+    tss_imgs_us = np.array([int(os.path.basename(f).split('_')[0])
+                            for f in rgb_files], dtype=np.float64)
+    tss_imgs_us = tss_imgs_us[::stride]
+
+    if dT_ms is None:
+        dT_ms = np.mean(np.diff(tss_imgs_us)) / 1e3  # µs → ms
+
+    # ── Load events (already in µs, columns: [ts_us, x, y, polarity]) ─────
+    evs_file = os.path.join(scenedir, "events.txt")
+    print(f"Loading events from {evs_file} ...")
+    evs = pd.read_csv(evs_file, sep=r'\s+', header=None,
+                      dtype={0: np.int64, 1: np.uint16, 2: np.uint16, 3: np.int8}).values.astype(np.float64)
+    # timestamps are already in microseconds — no conversion needed
+
+    print(f"Loaded {len(evs):,} events, {len(tss_imgs_us)} frames, dT_ms={dT_ms:.2f}")
+
+    # ── Slice events per frame using searchsorted (O(M log N) vs O(M*N)) ──
+    evs_t = evs[:, 0]  # sorted timestamp column for binary search
+    data_list = []
+    for ts_idx in range(len(tss_imgs_us) - 1):
+        t0_us = tss_imgs_us[ts_idx]
+        t1_us = t0_us + dT_ms * 1e3
+
+        i0 = int(np.searchsorted(evs_t, t0_us))
+        i1 = int(np.searchsorted(evs_t, t1_us))
+        if i0 == i1:
+            continue
+
+        evs_batch = evs[i0:i1].copy()
+        rect = rectify_map[evs_batch[:, 2].astype(np.int32), evs_batch[:, 1].astype(np.int32)]
+        voxel = to_voxel_grid(rect[..., 0], rect[..., 1],
+                              evs_batch[:, 0], evs_batch[:, 3],
+                              H=H, W=W, nb_of_time_bins=5)
+        ts_out = min((t0_us + t1_us) / 2.0, tss_imgs_us[ts_idx + 1])
+        data_list.append((voxel, intrinsics.clone(), ts_out))
+
+    if timing:
+        t1_ev.record()
+        torch.cuda.synchronize()
+        dt = t0_ev.elapsed_time(t1_ev) / 1e3
+        print(f"Preloaded {len(data_list)} CEAR voxels in {dt:.1f}s on {scenedir}")
+    print(f"Preloaded {len(data_list)} CEAR voxels, stride={stride}, dT_ms={dT_ms:.2f} on {scenedir}")
+
+    for (voxel, intr, ts_us) in data_list:
+        yield voxel.cuda(), intr.cuda(), ts_us
+
+
+def mvsec_h5_iterator(h5_path, stride=1, H=260, W=346, skip_start_s=0.0):
+    """Iterator for MVSEC using the preprocessed H5 from deep_event_odometry pipeline.
+
+    Events in the H5 are already undistorted (float coords in undistorted image frame),
+    so no additional rectification is applied — K_event_undist is used directly.
+
+    H5 layout:
+      events/t_us         (N,)        event timestamps in µs (int64)
+      events/x, y         (N,)        undistorted pixel coords (float16)
+      events/p            (N,)        polarities (int8, 0/1)
+      events/slices_index (F,)        start index in events for frame i
+      frames/depth_t_us   (F,)        frame timestamps in µs (int64)
+      meta/K_event_undist (3,3)       undistorted camera matrix
+    """
+    import h5py
+
+    f = h5py.File(h5_path, 'r')
+
+    # Intrinsics (undistorted)
+    K_undist    = f['meta/K_event_undist'][:].astype(np.float32)
+    intrinsics  = torch.as_tensor([K_undist[0, 0], K_undist[1, 1], K_undist[0, 2], K_undist[1, 2]])
+
+    # Events (already undistorted)
+    evs_t  = f['events/t_us'][:]                   # µs, int64
+    evs_x  = f['events/x'][:].astype(np.float32)  # float16 → float32
+    evs_y  = f['events/y'][:].astype(np.float32)
+    evs_p  = f['events/p'][:].astype(np.int8)
+    slices = f['events/slices_index'][:]           # (F,) start indices per frame
+    tss_us = f['frames/depth_t_us'][:]             # (F,) frame timestamps µs
+
+    f.close()
+
+    n_windows = len(slices) - 1  # events for window i: evs[slices[i]:slices[i+1]]
+
+    data_list = []
+    for i in range(0, n_windows, stride):
+        i0, i1 = int(slices[i]), int(slices[i + 1])
+        if i0 == i1:
+            continue
+
+        xi = np.clip(evs_x[i0:i1], 0.0, W - 1.0)
+        yi = np.clip(evs_y[i0:i1], 0.0, H - 1.0)
+
+        voxel = to_voxel_grid(xi, yi,
+                              evs_t[i0:i1].astype(np.float64),
+                              evs_p[i0:i1],
+                              H=H, W=W, nb_of_time_bins=5)
+        ts_out = float(tss_us[i])
+        data_list.append((voxel, intrinsics.clone(), ts_out))
+
+    if skip_start_s > 0.0 and data_list:
+        t0_us = data_list[0][2]
+        data_list = [(v, intr, t) for (v, intr, t) in data_list
+                     if t - t0_us >= skip_start_s * 1e6]
+        print(f"Skipped first {skip_start_s}s — {len(data_list)} voxels remaining")
+
+    print(f"Preloaded {len(data_list)} MVSEC-H5 voxels from {h5_path}")
+
+    for (voxel, intr, ts_us_out) in data_list:
+        yield voxel.pin_memory().cuda(non_blocking=True), intr.cuda(), ts_us_out
+
+
+def vector_raw_iterator(h5_path, tss_frames_us, stride=1, H=480, W=640):
+    """Iterator for raw VECtor HDF5 event files (*.synced.left_event.hdf5).
+
+    Events are stored as raw integer pixel coordinates and must be undistorted
+    on the fly using the Prophesee Gen3 plumb_bob calibration from vector_config.yaml.
+
+    Args:
+        h5_path      : path to .synced.left_event.hdf5
+        tss_frames_us: (N,) absolute frame boundary timestamps in µs (e.g. from GT)
+        stride       : process every `stride`-th window
+    """
+    import h5py
+    import hdf5plugin  # required for bitshuffle decompression
+
+    # Prophesee Gen3 640×480 calibration (from vector_config.yaml)
+    K = np.array([[327.32749, 0.0, 314.97749],
+                  [0.0, 327.46184, 235.37621],
+                  [0.0, 0.0, 1.0]], dtype=np.float32)
+    D = np.array([-0.031982, 0.041966, -0.000507, -0.001031, 0.0], dtype=np.float32)
+
+    # New camera matrix (alpha=1.0 → full FOV, same as preprocessing)
+    K_undist, _ = cv2.getOptimalNewCameraMatrix(K, D, (W, H), alpha=1.0, newImgSize=(W, H))
+    K_undist = K_undist.astype(np.float32)
+
+    # Dense undistortion LUT: distorted integer pixel → undistorted coords
+    term_criteria = (cv2.TERM_CRITERIA_MAX_ITER | cv2.TERM_CRITERIA_EPS, 100, 0.001)
+    coords = np.stack(np.meshgrid(np.arange(W), np.arange(H))).reshape((2, -1)).astype("float32")
+    points = cv2.undistortPointsIter(coords, K, D, np.eye(3), K_undist, criteria=term_criteria)
+    rectify_map = points.reshape((H, W, 2))
+
+    intrinsics = torch.as_tensor([K_undist[0, 0], K_undist[1, 1], K_undist[0, 2], K_undist[1, 2]])
+
+    # Load all events (uint16 x/y, uint32 t relative to t_offset)
+    print(f"Loading VECtor events from {h5_path} ...")
+    with h5py.File(h5_path, 'r') as f:
+        t_offset_us = int(f['t_offset'][0])          # absolute µs
+        evs_t = f['events/t'][:].astype(np.int64)   # relative µs
+        evs_x = f['events/x'][:].astype(np.int32)
+        evs_y = f['events/y'][:].astype(np.int32)
+        evs_p = f['events/p'][:].astype(np.int8)
+
+    # Frame boundaries in relative µs
+    tss_rel = tss_frames_us.astype(np.int64) - t_offset_us
+
+    data_list = []
+    for i in range(0, len(tss_rel) - 1, stride):
+        t0, t1 = tss_rel[i], tss_rel[i + 1]
+        if t0 < 0 or t1 > evs_t[-1]:
+            continue
+
+        i0 = int(np.searchsorted(evs_t, t0, side='left'))
+        i1 = int(np.searchsorted(evs_t, t1, side='left'))
+        if i0 >= i1:
+            continue
+
+        xi = np.clip(evs_x[i0:i1], 0, W - 1)
+        yi = np.clip(evs_y[i0:i1], 0, H - 1)
+        rect = rectify_map[yi, xi]
+
+        voxel = to_voxel_grid(rect[..., 0], rect[..., 1],
+                              evs_t[i0:i1].astype(np.float64),
+                              evs_p[i0:i1],
+                              H=H, W=W, nb_of_time_bins=5)
+        ts_out = float(tss_frames_us[i + 1])
+        data_list.append((voxel, intrinsics.clone(), ts_out))
+
+    print(f"Preloaded {len(data_list)} VECtor-raw voxels from {h5_path}")
+
+    for (voxel, intr, ts_us_out) in data_list:
+        yield voxel.pin_memory().cuda(non_blocking=True), intr.cuda(), ts_us_out
+
+
+def m3ed_raw_iterator(data_h5_path, tss_frames_us, stride=1, H=720, W=1280, skip_start_s=0.0):
+    """Iterator for M3ED raw *_data.h5 files (Prophesee Gen4 1280×720 event camera).
+
+    Events are stored as raw integer pixel coordinates under prophesee/left and
+    must be undistorted on the fly using the per-file radtan calibration.
+    M3ED sequences can have billions of events, so events are read lazily per
+    frame using the ms_map_idx index rather than preloaded into RAM.
+
+    Args:
+        data_h5_path : path to *_data.h5
+        tss_frames_us: (N,) absolute frame boundary timestamps in µs
+                       (ts_map_prophesee_left from *_pose_gt.h5)
+        stride       : process every `stride`-th window
+        skip_start_s : skip the first N seconds
+    """
+    import h5py
+
+    f = h5py.File(data_h5_path, 'r')
+
+    # ── Calibration ───────────────────────────────────────────────────────
+    intr4 = f['prophesee/left/calib/intrinsics'][:]       # [fx, fy, cx, cy]
+    K = np.array([[intr4[0], 0.0, intr4[2]],
+                  [0.0, intr4[1], intr4[3]],
+                  [0.0, 0.0,      1.0     ]], dtype=np.float32)
+    D_4 = f['prophesee/left/calib/distortion_coeffs'][:].astype(np.float32)
+    D   = np.append(D_4, 0.0).astype(np.float32)          # radtan k1 k2 p1 p2 → 5-coeff OpenCV
+
+    K_undist, _ = cv2.getOptimalNewCameraMatrix(K, D, (W, H), alpha=0, newImgSize=(W, H))
+    K_undist = K_undist.astype(np.float32)
+    term_criteria = (cv2.TERM_CRITERIA_MAX_ITER | cv2.TERM_CRITERIA_EPS, 100, 0.001)
+    coords = np.stack(np.meshgrid(np.arange(W), np.arange(H))).reshape((2, -1)).astype("float32")
+    points = cv2.undistortPointsIter(coords, K, D, np.eye(3), K_undist, criteria=term_criteria)
+    rectify_map = points.reshape((H, W, 2))
+    intrinsics = torch.as_tensor([K_undist[0, 0], K_undist[1, 1], K_undist[0, 2], K_undist[1, 2]])
+
+    # ── Event datasets (kept open for lazy per-frame reads) ────────────────
+    ms_map_idx = f['prophesee/left/ms_map_idx'][:]        # (n_ms,) event start idx per ms
+    evs_x = f['prophesee/left/x']                         # uint16, lazy HDF5 dataset
+    evs_y = f['prophesee/left/y']
+    evs_t = f['prophesee/left/t']                         # int64 µs
+    evs_p = f['prophesee/left/p']                         # int8
+    n_events  = len(evs_t)
+    n_ms      = len(ms_map_idx)
+
+    tss = tss_frames_us.astype(np.int64)
+
+    # apply skip_start
+    start_frame = 0
+    if skip_start_s > 0.0 and len(tss) > 0:
+        t_start_us = tss[0] + int(skip_start_s * 1e6)
+        start_frame = int(np.searchsorted(tss, t_start_us, side='left'))
+        print(f"Skipped first {skip_start_s}s of M3ED — starting at frame {start_frame}")
+
+    n_yielded = 0
+    for i in range(start_frame, len(tss) - 1, stride):
+        t0_us = int(tss[i])
+        t1_us = int(tss[i + 1])
+
+        # ms_map_idx: ms → first event index with t >= ms*1000
+        ms0 = max(0,       t0_us // 1000)
+        ms1 = min(n_ms - 1, t1_us // 1000)
+
+        i0 = int(ms_map_idx[ms0])
+        i1 = int(ms_map_idx[ms1]) if ms1 < n_ms - 1 else n_events
+        if i0 >= i1:
+            continue
+
+        xi = np.clip(evs_x[i0:i1].astype(np.int32), 0, W - 1)
+        yi = np.clip(evs_y[i0:i1].astype(np.int32), 0, H - 1)
+        ti = evs_t[i0:i1].astype(np.float64)
+        pi = evs_p[i0:i1].astype(np.int8)
+
+        rect  = rectify_map[yi, xi]
+        voxel = to_voxel_grid(rect[..., 0], rect[..., 1], ti, pi,
+                              H=H, W=W, nb_of_time_bins=5)
+        ts_out = float(t1_us)
+        n_yielded += 1
+        yield voxel.cuda(), intrinsics.cuda(), ts_out
+
+    f.close()
+    print(f"M3ED iterator done: yielded {n_yielded} voxels from {data_h5_path}")
