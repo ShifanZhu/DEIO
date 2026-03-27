@@ -5,6 +5,21 @@ from torch.utils.tensorboard import SummaryWriter
 
 SUM_FREQ = 100 # TODO invariant to gpu_nums
 
+# Short display names for known metric keys
+_METRIC_LABELS = {
+    "loss/train":            "loss",
+    "loss/pose_train":       "pose",
+    "loss/rotation_train":   "rot",
+    "loss/translation_train":"trans",
+    "loss/flow_train":       "flow",
+    "loss/scores_train":     "scores",
+    "px1":                   "px<.25",
+    "r1":                    "r<.001",
+    "r2":                    "r<.01",
+    "t1":                    "t<.001",
+    "t2":                    "t<.01",
+}
+
 class Logger:
     def __init__(self, name, scheduler, total_steps=0, step=1):
         self.total_steps = total_steps
@@ -17,15 +32,17 @@ class Logger:
     def _print_training_status(self):
         if self.writer is None:
             self.writer = SummaryWriter("runs/{}".format(self.name))
-            print([k for k in self.running_loss])
 
         lr = self.scheduler.get_lr().pop() # TODO use get_last_lr()
-        metrics_data = [self.running_loss[k]/SUM_FREQ for k in self.running_loss.keys()]
-        training_str = "[{:6d}, {:10.7f}] ".format(self.total_steps * self.step + 1, lr)
-        metrics_str = ("{:10.4f}, "*len(metrics_data)).format(*metrics_data)
-        
-        # print the training status
-        print(training_str + metrics_str)
+
+        parts = ["step={:<6d}  lr={:.2e}".format(
+            self.total_steps * self.step + 1, lr)]
+        for k in self.running_loss:
+            val = self.running_loss[k] / SUM_FREQ
+            label = _METRIC_LABELS.get(k, k.split("/")[-1])
+            parts.append("{}={:.4f}".format(label, val))
+
+        print("  ".join(parts))
 
         for key in self.running_loss:
             val = self.running_loss[key] / SUM_FREQ
@@ -64,5 +81,6 @@ class Logger:
             self.writer.add_figure(key, figures[key], self.total_steps * self.step)
 
     def close(self):
-        self.writer.close()
+        if self.writer is not None:
+            self.writer.close()
 

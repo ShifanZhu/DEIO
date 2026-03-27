@@ -153,10 +153,13 @@ class TartanAirEVS(EVSDDataset):
         print("Building TartanAir EVSD dataset")
 
         scene_info = {}
-        scenes = glob.glob(osp.join(self.root, '*/*/evs_left'))
-        scenes = [glob.glob(osp.join(s, '*/*/*/*')) for s in scenes]
-        scenes = functools.reduce(operator.concat, scenes)
-        for scene in tqdm(sorted(scenes)):
+
+        # --- nested structure: root/scene/difficulty/evs_left/scene/scene/difficulty/seqnum ---
+        nested_evs = glob.glob(osp.join(self.root, '*/*/evs_left'))
+        nested_scenes = [glob.glob(osp.join(s, '*/*/*/*')) for s in nested_evs]
+        nested_scenes = functools.reduce(operator.concat, nested_scenes, [])
+
+        for scene in tqdm(sorted(nested_scenes)):
             if not is_converted(scene):
                 print(f"Skipping {scene}. Not fully converted")
                 continue
@@ -166,24 +169,50 @@ class TartanAirEVS(EVSDDataset):
 
             voxels = sorted(glob.glob(osp.join(scene, 'h5/*.h5')))
             assert len(voxels) > 0
-            depths = sorted(glob.glob(osp.join(scene.replace("evs_left", "depth_left"), 'depth_left/*.npy')))[1:] # No event voxel at first timestamp t=0
+            depths = sorted(glob.glob(osp.join(scene.replace("evs_left", "depth_left"), 'depth_left/*.npy')))[1:]
             assert len(voxels) == len(depths)
 
-            # [simon] poses are c2w, did thorough viz and data_type.md]
-            poses = np.loadtxt(osp.join(scene.replace('evs_left', 'image_left'), 'pose_left.txt'), delimiter=' ')[1:] # No event voxel at first timestamp t=0
-            poses = poses[:, [1, 2, 0, 4, 5, 3, 6]] # NED (z,x,y) to (x,y,z) camera frame
+            poses = np.loadtxt(osp.join(scene.replace('evs_left', 'image_left'), 'pose_left.txt'), delimiter=' ')[1:]
+            poses = poses[:, [1, 2, 0, 4, 5, 3, 6]]
             poses[:,:3] /= TartanAirEVS.DEPTH_SCALE
             intrinsics = [TartanAirEVS.calib_read()] * len(voxels)
             assert poses.shape[0] == len(voxels)
 
-            # graph of co-visible frames based on flow
-            graph = self.build_frame_graph(poses, depths, intrinsics) # graph is dict of {frameIdx: (co-visible frames, distance)}
-
-            scene = '/'.join(scene.split('/'))
+            graph = self.build_frame_graph(poses, depths, intrinsics)
             scene_info[scene] = {'voxels': voxels, 'depths': depths,
                 'poses': poses, 'intrinsics': intrinsics, 'graph': graph}
-            
             print(f"Added {scene} to TartanAir EVDS dataset")
+
+        # --- flat structure: root/seqname/evs_left (single-level sample sequences) ---
+        flat_evs = glob.glob(osp.join(self.root, '*/evs_left'))
+
+        for evs_dir in tqdm(sorted(flat_evs)):
+            seq_dir = osp.dirname(evs_dir)
+
+            if not scene_in_split(seq_dir, self.train_split):
+                continue
+
+            voxels = sorted(glob.glob(osp.join(evs_dir, 'h5/*.h5')))
+            if not voxels:
+                continue
+
+            depths = sorted(glob.glob(osp.join(seq_dir, 'depth_left/*.npy')))[1:]
+            if len(voxels) != len(depths):
+                print(f"Skipping {seq_dir}: voxel/depth count mismatch ({len(voxels)} vs {len(depths)})")
+                continue
+
+            poses = np.loadtxt(osp.join(seq_dir, 'pose_left.txt'), delimiter=' ')[1:]
+            poses = poses[:, [1, 2, 0, 4, 5, 3, 6]]
+            poses[:,:3] /= TartanAirEVS.DEPTH_SCALE
+            intrinsics = [TartanAirEVS.calib_read()] * len(voxels)
+            if poses.shape[0] != len(voxels):
+                print(f"Skipping {seq_dir}: pose/voxel count mismatch")
+                continue
+
+            graph = self.build_frame_graph(poses, depths, intrinsics)
+            scene_info[evs_dir] = {'voxels': voxels, 'depths': depths,
+                'poses': poses, 'intrinsics': intrinsics, 'graph': graph}
+            print(f"Added {evs_dir} to TartanAir EVDS dataset")
 
         return scene_info
 

@@ -13,7 +13,7 @@ SETTINGS['plot_backend'] = 'Agg'
 
 from utils.eval_utils import EVO_run, assert_eval_config
 from utils.load_utils import voxel_iterator_parallel, voxel_iterator
-from utils.eval_utils import log_results, log_results_loss, write_raw_results, compute_results, compute_median_results
+from utils.eval_utils import log_results, write_raw_results, compute_median_results
 from utils.transform_utils import transform_rescale_poses
 from utils.viz_utils import viz_flow_inference
 
@@ -25,12 +25,13 @@ def evaluate(config, args, net, train_step=None, datapath="", split_file=None,
 
     if config is None:
         config = cfg
-        config.merge_from_file("config/default.yaml")
+        config.merge_from_file("config/default_devo.yaml")
 
     scenes = open(split_file).read().split()
 
     results_dict_scene, loss_dict_scene, figures = {}, {}, {}
     all_results = []
+    outfolder = "results"
     for i, scene in enumerate(scenes):
         print(f"Eval on {scene}")
         # scene_name = '_'.join(scene.split('/')[1:]).title() if "/P0" in scene else scene.title()
@@ -41,17 +42,25 @@ def evaluate(config, args, net, train_step=None, datapath="", split_file=None,
         for trial in range(trials):
 
             # estimated trajectory
-            datapath_val = os.path.join(datapath, scene.split("/")[0], scene.split("/")[2])
-            scene_path = os.path.join(datapath_val, "evs_left", scene, "h5")
-            traj_ref = osp.join(datapath_val, "image_left", scene, "pose_left.txt")
+            parts = scene.split("/")
+            if len(parts) == 3:
+                # nested: scene/difficulty/seqnum  -> datapath/scene/seqnum/evs_left/scene/difficulty/seqnum/h5
+                datapath_val = os.path.join(datapath, parts[0], parts[2])
+                scene_path = os.path.join(datapath_val, "evs_left", scene, "h5")
+                traj_ref = osp.join(datapath_val, "image_left", scene, "pose_left.txt")
+            else:
+                # flat: seqname -> datapath/seqname/evs_left/h5
+                datapath_val = os.path.join(datapath, scene)
+                scene_path = os.path.join(datapath_val, "evs_left", "h5")
+                traj_ref = osp.join(datapath_val, "pose_left.txt")
 
             # run the slam system
             if scale != 1.0:
                 nH, nW = math.floor(scale * 480), math.floor(scale * 640) # TODO in tartan_rgb and tartan_frame
                 kwargs.update({"scale": scale, "H": nH, "W": nW})
-            traj_est, tstamps, flowdata = EVO_run(scene_path, config, net, viz=viz,
-                                                 iterator=voxel_iterator(scene_path, timing=timing, stride=stride, scale=scale),
-                                                 timing=timing, **kwargs, viz_flow=viz_flow)
+            traj_est, tstamps, flowdata, _ = EVO_run(scene_path, config, net, viz=viz,
+                                                    iterator=voxel_iterator(scene_path, timing=timing, stride=stride, scale=scale),
+                                                    timing=timing, **kwargs, viz_flow=viz_flow)
 
             PERM = [1, 2, 0, 4, 5, 3, 6] # ned -> xyz
             # events between two adjacent frames t-1 and t are accumulated in event voxel t -> ignore first pose (t=0)

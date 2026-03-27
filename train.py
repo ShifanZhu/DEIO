@@ -160,9 +160,9 @@ def train(rank, args):
             profile_memory=True,
             with_stack=True
         ) if args.profiler else contextlib.nullcontext() as prof:
+        if rank == 0:
+            pbar = tqdm(total=args.gpu_num * args.steps, desc=f"Training {args.name}")
         while True:
-            if rank == 0:
-                pbar = tqdm(total=args.gpu_num * args.steps, desc=f"Training {args.name}")
             # training loop
             for data_blob in train_loader:
                 scene_id = data_blob.pop()
@@ -282,7 +282,7 @@ def train(rank, args):
                     pbar.update(args.gpu_num)#更新进度条
                     logger.push(metrics)#记录日志
 
-                if total_steps % 10000 == 0:
+                if total_steps % args.save_freq == 0 or total_steps >= args.steps:
                     torch.cuda.empty_cache()
 
                     if rank == 0:
@@ -298,7 +298,7 @@ def train(rank, args):
                             if args.evs:
                                 from script.train_eDBA.eval_tartan_evs import evaluate as eval_tartan_evs
                                 # 注意改为传入参数args
-                                val_results, val_figures = eval_tartan_evs(args, None, net.module if args.ddp else net, total_steps,
+                                val_results, val_figures = eval_tartan_evs(None, args, net.module if args.ddp else net, total_steps,
                                                                         args.datapath, args.val_split, return_figure=True, plot=True, rpg_eval=False,
                                                                         scale=args.scale, expname=args.name, **kwargs_net)
                             else:
@@ -369,6 +369,7 @@ if __name__ == '__main__':
     parser.add_argument('--datapath', default='', help='path to dataset directory')
     parser.add_argument('--batch', type=int, default=1)
     parser.add_argument('--steps', type=int, default=240000, help='total steps')
+    parser.add_argument('--save_freq', type=int, default=10000, help='checkpoint save frequency in steps')
     parser.add_argument('--iters', type=int, default=18, help='iterations of update operator per edge in patch graph') # default: 18
     parser.add_argument('--lr', type=float, default=0.00008)
     parser.add_argument('--clip', type=float, default=10.0)

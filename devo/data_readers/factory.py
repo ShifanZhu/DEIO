@@ -3,6 +3,7 @@ import os
 import os.path as osp
 
 from .tartan import TartanAir, TartanAirEVS, TartanAirE2VID
+from .deep_event_odom import DeepEventOdomDataset
 
 
 def dataset_factory(dataset_list, **kwargs):
@@ -10,10 +11,11 @@ def dataset_factory(dataset_list, **kwargs):
 
     from torch.utils.data import ConcatDataset
 
-    dataset_map = { 
+    dataset_map = {
         'tartan': (TartanAir, ),
         'tartan_evs': (TartanAirEVS, ),
         'tartan_e2vid':  (TartanAirE2VID, ),
+        'deep_event_odom': (DeepEventOdomDataset, ),
     }
     
     if not all(x in dataset_map for x in dataset_list):

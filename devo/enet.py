@@ -41,7 +41,7 @@ from .utils import *
 from .ba import BA  # Differentiable Bundle Adjustment
 from . import projective_ops as pops
 
-autocast = torch.cuda.amp.autocast
+autocast = lambda **kwargs: torch.amp.autocast('cuda', **kwargs)
 import matplotlib.pyplot as plt
 
 # Event voxel processing utilities
@@ -65,6 +65,14 @@ class Update(nn.Module):
     Architecture corresponds to Paper Equation (2):
         Minimize ||π[T_j^(-1)·T_i·π^(-1)(P̂_in)] - [P̂_in + δ_inj]||²_Σ_inj
 
+    The hidden state `net` (B, num_edges, 384) is the core of the learned matching prior.
+    Over 18 iterations of the forward pass it accumulates three types of information:
+        1. Correlation evidence  — what the CorrBlock sees in a ±12px search window
+        2. Neighbor consensus    — what other patches/frame-pairs agree on (message passing)
+        3. Temporal memory       — what was believed in previous iterations (GRU gating)
+    This joint representation is what makes the Update operator more than a simple flow
+    predictor: it performs learned approximate inference over patch correspondences.
+
     Args:
         p: Patch size (default: 3x3)
         dim: Hidden state dimension (default: 384)
@@ -73,26 +81,56 @@ class Update(nn.Module):
         super(Update, self).__init__()
         self.dim = dim
 
-        # MLPs for aggregating information from neighboring edges in the patch graph
-        # These implement message passing between connected patches
+        # c1: MLP for cross-frame message passing — same patch, different target frame.
+        # For edge (patch_k -> frame_j), c1 reads the hidden state of edge (patch_k -> frame_j')
+        # and propagates it. Learns: "if patch k is confidently tracked to frame j', use
+        # that evidence to regularize tracking of the same patch to frame j."
+        # Trained via BPTT: gradient teaches c1 which neighbor states improve flow accuracy.
         self.c1 = nn.Sequential(
             nn.Linear(dim, dim),
             nn.ReLU(inplace=True),
             nn.Linear(dim, dim))
 
+        # c2: MLP for same-frame-pair message passing — different patch, same target frame.
+        # For edge (patch_k -> frame_j), c2 reads the hidden state of edge (patch_k' -> frame_j).
+        # Learns: "if many other patches agree on the same motion to frame j, pull ambiguous
+        # patches toward that consensus." This is a learned spatial consistency check.
         self.c2 = nn.Sequential(
             nn.Linear(dim, dim),
             nn.ReLU(inplace=True),
             nn.Linear(dim, dim))
 
+        # LayerNorm after fusing net + inp + corr prevents any one source from dominating
+        # and stabilises the scale of the hidden state for backprop through 18 iterations.
         self.norm = nn.LayerNorm(dim, eps=1e-3)
 
-        # Soft aggregation modules for pooling features
-        self.agg_kk = SoftAgg(dim)  # Aggregate over patches (same patch, different frames)
-        self.agg_ij = SoftAgg(dim)  # Aggregate over frame pairs (i, j)
+        # agg_kk: Soft attention pooling over all edges that share the same patch index kk.
+        # Groups: all edges (patch_k -> frame_0), (patch_k -> frame_1), ...
+        # The attention weight g(x) learns to up-weight target frames with reliable correlation
+        # (sharp peak, consistent δ) and down-weight ambiguous ones.
+        # The pooled result y represents the patch's global tracking consensus, broadcast back
+        # to every edge of that patch via h(y)[:, jx] (expand=True in SoftAgg).
+        self.agg_kk = SoftAgg(dim)
 
-        # GRU-style recurrent unit for maintaining temporal consistency
-        # This is the "recurrent" part of the recurrent optical flow network
+        # agg_ij: Soft attention pooling over all edges that share the same frame pair (i,j).
+        # Groups: all edges (patch_0 -> frame_j), (patch_1 -> frame_j), ... from frame_i.
+        # The attention weight learns to up-weight high-gradient, distinctively-matched patches,
+        # giving a global motion estimate for the frame pair shared across all its patches.
+        # This suppresses outlier patches without hard rejection.
+        self.agg_ij = SoftAgg(dim)
+
+        # GRU-style gated update: two stacked GatedResidual blocks.
+        # Each GatedResidual computes:
+        #   gate = sigmoid(W * net)        ∈ (0,1) per dimension — learned selectivity
+        #   res  = Linear(ReLU(Linear(net))) — proposed state update
+        #   out  = net + gate * res         — gated residual connection
+        #
+        # The gate learns per-dimension update rates:
+        #   - Dimensions encoding confident match direction: gate ≈ 1 → large update
+        #   - Dimensions encoding uncertain / ambiguous regions: gate ≈ 0 → hold prior
+        # Over training (BPTT across 18 iters), different dimensions of the 384-dim state
+        # specialise: some track flow confidence, some encode accumulated δ, some encode
+        # local scene structure (depth, planarity), some encode motion pattern.
         self.gru = nn.Sequential(
             nn.LayerNorm(dim, eps=1e-3),
             GatedResidual(dim),
@@ -100,8 +138,12 @@ class Update(nn.Module):
             GatedResidual(dim),
         )
 
-        # Process correlation features from CorrBlock
-        # Input size: 2 pyramid levels * 49 (7x7 search radius) * p*p (patch size)
+        # corr MLP: encodes the raw correlation volume into the hidden state dimension.
+        # Input: 2 pyramid levels × 49 (7×7 search window) × p² similarity scores.
+        # The wide search window (±12px effective radius at scale 4) is the key advantage
+        # over direct methods: the MLP learns to read a correlation peak anywhere in the
+        # window, giving a large convergence basin even with poor pose initialisation.
+        # Learns: "sharp peak at offset (+3,+2) → encode strong (+3,+2) flow signal."
         self.corr = nn.Sequential(
             nn.Linear(2*49*p*p, dim),
             nn.ReLU(inplace=True),
@@ -111,15 +153,20 @@ class Update(nn.Module):
             nn.Linear(dim, dim),
         )
 
-        # Predict optical flow delta: δ_inj ∈ R^2 (Paper Eq. 2)
-        # This is the 2D correction to the reprojected patch center
+        # d: predicts the 2D flow correction δ_inj from the hidden state.
+        # GradientClip limits gradient magnitude during BPTT to prevent explosion.
+        # Output δ is added to the current reprojected coords to form the BA target.
         self.d = nn.Sequential(
             nn.ReLU(inplace=False),
             nn.Linear(dim, 2),
             GradientClip())
 
-        # Predict confidence weights: Σ_inj ∈ R^2 (Paper Eq. 2)
-        # These weights indicate uncertainty in the flow prediction
+        # w: predicts the per-edge confidence weight Σ_inj ∈ (0,1)².
+        # Sigmoid ensures output is in (0,1). Used as the weight matrix in weighted BA:
+        #   high weight → patch strongly constrains pose/depth update
+        #   low weight  → patch is unreliable (flat region, occluded, bad correlation)
+        # The network learns to predict low confidence for event patches with flat
+        # correlation responses, effectively performing learned outlier rejection.
         self.w = nn.Sequential(
             nn.ReLU(inplace=False),
             nn.Linear(dim, 2),
@@ -129,48 +176,104 @@ class Update(nn.Module):
 
     def forward(self, net, inp, corr, flow, ii, jj, kk):
         """
-        Recurrent update step for optical flow prediction
+        One recurrent update step — called STEPS times (default 18) per forward pass.
+
+        The hidden state `net` persists across all STEPS calls and accumulates evidence.
+        At iteration 1 (poor pose estimate): correlation is noisy, net is near zero,
+        delta is small and uncertain. By iteration 10+ (refined pose): correlation has
+        a sharp peak, net has accumulated 10 rounds of evidence, delta is confident.
+        This is analogous to a learned Kalman filter: net is the belief state, the GRU
+        gates decide how much to update it vs. trust the prior from the last iteration.
+
+        Information flow within one step:
+            net[t-1] (memory)
+            + inp     (static patch context from inet, never changes)
+            + corr    (current correlation given current pose estimate)
+            → LayerNorm
+            → c1/c2 message passing (cross-frame and cross-patch consensus)
+            → agg_kk/agg_ij soft attention pooling (global patch/frame-pair consensus)
+            → GRU gating (selective update of belief state)
+            → net[t] (updated memory)
+            → delta, weight (predictions for this iteration's BA step)
 
         Args:
-            net: Hidden state from previous iteration (B, num_edges, dim)
-            inp: Context features from patches (B, num_edges, dim)
+            net:  Hidden state from previous iteration (B, num_edges, dim=384)
+                  Carries accumulated matching evidence across all previous iterations.
+            inp:  Static context features from inet at patch centres (B, num_edges, dim)
+                  Encodes "what kind of region is this patch from" — never changes per step.
             corr: Correlation features from CorrBlock (B, num_edges, 2*49*p*p)
-            flow: Not used (kept for compatibility)
-            ii: Source frame indices for edges (num_edges,)
-            jj: Target frame indices for edges (num_edges,)
-            kk: Patch indices for edges (num_edges,)
+                  Encodes similarity scores across a ±12px search window at 2 pyramid scales.
+            flow: Not used (kept for API compatibility with baseline VONet).
+            ii:   Source frame index for each edge (num_edges,)
+            jj:   Target frame index for each edge (num_edges,)
+            kk:   Patch index for each edge (num_edges,)
 
         Returns:
-            net: Updated hidden state (B, num_edges, dim)
-            (delta, weights, None):
-                - delta: Optical flow correction δ_inj (B, num_edges, 2)
-                - weights: Confidence Σ_inj (B, num_edges, 2)
+            net:     Updated hidden state (B, num_edges, dim) — passed to next iteration
+            delta:   Flow correction δ_inj (B, num_edges, 2) — added to projected coords
+                     to form the target for differentiable BA
+            weights: Confidence Σ_inj (B, num_edges, 2) — weights in the BA cost function;
+                     learned outlier rejection signal
         """
-        # Combine hidden state, context features, and correlation features
+        # === STEP 1: FUSE THREE INFORMATION SOURCES ===
+        # net[t-1]: memory of previous iterations (what was believed before)
+        # inp:      static patch context (distinctiveness, texture type)
+        # corr(corr): reads the correlation volume → encodes where the best match is
+        #             in the ±12px search window at the current pose estimate
+        # LayerNorm prevents any one source dominating and stabilises BPTT gradients.
         net = net + inp + self.corr(corr)
         net = self.norm(net)  # (B, num_edges, 384)
 
-        # Message passing: aggregate information from neighboring edges
-        # This implements graph convolution on the patch co-visibility graph
-        ix, jx = fastba.neighbors(kk, jj)  # Find neighboring edges
+        # === STEP 2: NEIGHBOR MESSAGE PASSING ===
+        # fastba.neighbors(kk, jj) returns for each edge e = (patch_k → frame_j):
+        #   ix[e]: index of edge (patch_k → some_other_frame)  [same patch, diff target]
+        #   jx[e]: index of edge (some_other_patch → frame_j)  [diff patch, same target]
+        # Masks handle boundary edges (no neighbor) by zeroing their contribution.
+        ix, jx = fastba.neighbors(kk, jj)
         mask_ix = (ix >= 0).float().reshape(1, -1, 1)
         mask_jx = (jx >= 0).float().reshape(1, -1, 1)
 
-        # Aggregate from neighbors
+        # c1: cross-frame consistency for the same patch.
+        # "If patch k is confidently tracked to frame j' (strong correlation, high net magnitude),
+        #  propagate that into the state for (patch k → frame j)."
+        # Gradient teaches c1 which cross-frame information improves flow accuracy.
         net = net + self.c1(mask_ix * net[:,ix])
+
+        # c2: spatial consensus across patches for the same frame pair.
+        # "If patches 42,43,44 all tracked to frame j agree on motion (+3,0),
+        #  pull the state of ambiguous patch 45 toward that consensus."
+        # This is a learned spatial consistency check (analogous to RANSAC but differentiable).
         net = net + self.c2(mask_jx * net[:,jx])
 
-        # Soft aggregation over patches and frame pairs
-        net = net + self.agg_kk(net, kk)  # Pool features from same patch
-        net = net + self.agg_ij(net, ii*12345 + jj)  # Pool features from same frame pair
+        # === STEP 3: SOFT ATTENTION POOLING ===
+        # agg_kk: pools over all edges for the same patch (all target frames).
+        # The attention weight g(x) learns to emphasise target frames with reliable
+        # correlation; the pooled consensus is broadcast back to every edge of patch k.
+        # Suppresses ambiguous target frames without hard rejection.
+        net = net + self.agg_kk(net, kk)
 
-        # Recurrent update (GRU-style)
+        # agg_ij: pools over all edges for the same frame pair (all patches).
+        # Learns which patches are most informative about the relative pose between
+        # frames i and j (high-gradient, distinctive patches dominate).
+        # Gives a global motion estimate shared across all patches in the frame pair.
+        net = net + self.agg_ij(net, ii*12345 + jj)
+
+        # === STEP 4: GATED RECURRENT UPDATE ===
+        # Two GatedResidual blocks selectively update the belief state:
+        #   gate = sigmoid(W*net) ∈ (0,1) — per-dimension update rate
+        #   gate ≈ 1 for dimensions encoding confident match direction → large update
+        #   gate ≈ 0 for dimensions encoding uncertain regions → hold prior belief
+        # After training via BPTT, different dimensions specialise: flow confidence,
+        # accumulated δ estimate, local depth structure, motion pattern, etc.
         net = self.gru(net)
 
-        # Predict confidence weights
+        # === STEP 5: PREDICT OUTPUTS ===
+        # weight ∈ (0,1)²: confidence for this edge's flow prediction.
+        # Low weight = unreliable patch (flat region, occluded, ambiguous correlation).
+        # Used as the W matrix in weighted BA — learned outlier rejection.
         weights = self.w(net)
 
-        # Return updated state and predictions
+        # delta ∈ R²: 2D flow correction added to current projected coords → BA target.
         return net, (self.d(net), weights, None)
 
 

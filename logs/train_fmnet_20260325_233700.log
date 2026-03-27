@@ -1,0 +1,37 @@
+/home/s/repos/DEIO/devo/fmnet.py:168: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  @autocast(enabled=False)
+----------
+Config:
+Namespace(config=None, name='fmnet_base', checkpoint='', data_path='/media/s/SF_backup/deep_event_odometry/cear/indoor/', n_keyframes=4, interval_frames=5, sub_frame_stride=1, d_max=100.0, depth_k=1.0, bins=5, dim_fnet=128, dim_inet=384, dim=32, norm='std2', randaug=True, patches_per_image=80, batch=1, steps=100000, iters=12, gn_iters=4, lr=8e-05, clip=10.0, pose_weight=10.0, feat_weight=0.1, ddp=False, gpu_num=1, port='12349')
+----------
+Config File (config/fmnet_base.conf):
+  name:              fmnet_base
+  checkpoint:        
+  data_path:         /media/s/SF_backup/deep_event_odometry/cear/indoor/
+  n_keyframes:       4
+  interval_frames:   5
+  sub_frame_stride:  1
+  bins:              5
+  d_max:             100.0
+  depth_k:           1.0
+  dim_fnet:          128
+  dim_inet:          384
+  dim:               32
+  patches_per_image: 80
+  norm:              std2
+  randaug:           True
+  batch:             1
+  steps:             100000
+  iters:             12
+  gn_iters:          4
+  lr:                0.00008
+  clip:              10.0
+  pose_weight:       10.0
+  feat_weight:       0.1
+Defaults:
+  --gpu_num:         1
+  --port:            12349
+
+----------
+Dataset deep_event_odom has 64234 images
+Training fmnet_base:   0%|          | 0/100000 [00:00<?, ?it/s]Training fmnet_base:   0%|          | 1/100000 [00:58<1638:42:48, 58.99s/it]Training fmnet_base:   0%|          | 2/100000 [01:57<1626:03:17, 58.54s/it]Training fmnet_base:   0%|          | 3/100000 [02:51<1577:55:10, 56.81s/it]Training fmnet_base:   0%|          | 4/100000 [03:26<1330:37:35, 47.90s/it]Training fmnet_base:   0%|          | 5/100000 [03:54<1133:35:22, 40.81s/it]Training fmnet_base:   0%|          | 6/100000 [04:23<1018:11:11, 36.66s/it]Training fmnet_base:   0%|          | 7/100000 [04:51<942:20:39, 33.93s/it] Training fmnet_base:   0%|          | 8/100000 [05:19<890:01:47, 32.04s/it]Training fmnet_base:   0%|          | 9/100000 [05:47<859:16:05, 30.94s/it]Training fmnet_base:   0%|          | 10/100000 [06:16<837:23:09, 30.15s/it]Training fmnet_base:   0%|          | 11/100000 [06:49<862:58:55, 31.07s/it]Training fmnet_base:   0%|          | 12/100000 [07:27<923:01:03, 33.23s/it]Training fmnet_base:   0%|          | 13/100000 [08:05<963:34:56, 34.69s/it]Training fmnet_base:   0%|          | 14/100000 [08:44<999:48:37, 36.00s/it]Training fmnet_base:   0%|          | 15/100000 [09:24<1028:26:48, 37.03s/it]Training fmnet_base:   0%|          | 16/100000 [10:02<1041:41:35, 37.51s/it]Training fmnet_base:   0%|          | 17/100000 [10:43<1067:22:59, 38.43s/it]Training fmnet_base:   0%|          | 18/100000 [11:23<1078:58:50, 38.85s/it]Training fmnet_base:   0%|          | 19/100000 [12:03<1092:13:46, 39.33s/it]Training fmnet_base:   0%|          | 20/100000 [12:38<1057:15:11, 38.07s/it]Training fmnet_base:   0%|          | 21/100000 [13:07<976:04:21, 35.15s/it] Training fmnet_base:   0%|          | 22/100000 [13:35<922:16:01, 33.21s/it]

@@ -435,7 +435,7 @@ def log_results(data, hyperparam, all_results, results_dict_scene, figures,
     # 新增参数_n_to_align
     ape_trans = main_ape.ape(copy.deepcopy(evoGT), copy.deepcopy(evoEst), pose_relation=metrics.PoseRelation.translation_part, align=True,n_to_align=_n_to_align, correct_scale=True)
     # 用红色字体显示
-    print(f"\033[31m EVO结果：{ape_trans}\033[0m");
+    print(f"\033[31m EVO results: {ape_trans}\033[0m")
     if _n_to_align!=-1:
         print(f"align {_n_to_align} frames")
     MPE = ape_trans.stats["mean"] / gtlentraj * 100

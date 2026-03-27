@@ -5,6 +5,7 @@ checkpoints
 *.out
 *.o
 *.zip
+*.so
 data
 
 models/*
@@ -15,3 +16,6 @@ ORBvoc.txt
 
 results/*
 weight/*
+
+thirdparty
+runs
