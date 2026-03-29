@@ -249,13 +249,14 @@ def get_alg(n):
 
 def make_outfolder(outdir, dataset_name, expname, scene_name, trial, train_step, stride, calib1_eds, camID_tumvie):
     date = datetime.datetime.today().strftime('%Y-%m-%d') # TODO improve output folder
-    outfolder = os.path.join(f"{outdir}/{dataset_name}/{date}/{expname}/{scene_name}_trial_{trial}_step_{train_step}")
+    scene_folder = f"{scene_name}_trial_{trial}"
     if stride != 1:
-        outfolder = outfolder + f"_stride_{stride}"
+        scene_folder = scene_folder + f"_stride_{stride}"
     if calib1_eds != None:
-        outfolder = outfolder + f"_calib1" if calib1_eds else outfolder + f"_calib0"
+        scene_folder = scene_folder + f"_calib1" if calib1_eds else scene_folder + f"_calib0"
     if camID_tumvie != None:
-        outfolder = outfolder + f"_camID_{camID_tumvie}"
+        scene_folder = scene_folder + f"_camID_{camID_tumvie}"
+    outfolder = os.path.join(f"{outdir}/{dataset_name}/{date}/{expname}/step_{train_step}/{scene_folder}")
     outfolder = os.path.abspath(outfolder)
     os.makedirs(outfolder, exist_ok=True)
     return outfolder
@@ -406,7 +407,7 @@ def log_results(data, hyperparam, all_results, results_dict_scene, figures,
             train_step = os.path.basename(net.split(".")[0])
         else:
             train_step = -1
-    scene_name = '_'.join(scene.split('/')[1:]).title() if "/P0" in scene else scene.title()
+    scene_name = '_'.join(scene.split('/')).title() if "/P0" in scene else scene.title()
     if outdir is None:
         outdir = "results"
     outfolder = make_outfolder(outdir, dataset_name, expname, scene_name, trial, train_step, stride, calib1_eds, camID_tumvie)
@@ -491,15 +492,14 @@ def log_results(data, hyperparam, all_results, results_dict_scene, figures,
 
     if plot:
         Path(f"{outfolder}/").mkdir(exist_ok=True)
-        pdfname = f"{outfolder}/../{scene_name}_Trial{trial+1:02d}_exp_{expname}_step_{train_step}_stride_{stride}.pdf"
-        plot_trajectory((traj_est, tss_est_us/1e6), (traj_GT, tss_GT_us/1e6), 
+        pdfname = f"{outfolder}/{scene_name}_Trial{trial+1:02d}.pdf"
+        plot_trajectory((traj_est, tss_est_us/1e6), (traj_GT, tss_GT_us/1e6),
                         f"{dataset_name} {expname} {scene_name.replace('_', ' ')} Trial #{trial} {res_str}",
                         pdfname, align=True, correct_scale=True, max_diff_sec=max_diff_sec)
-        shutil.copy(pdfname, f"{outfolder}/{scene_name}_Trial{trial+1:02d}_step_{train_step}_stride_{stride}.pdf")#将pdf文件复制到outfolder文件夹下
 
         # [DEBUG]
-        pdfname = f"{outfolder}/GT_{scene_name}_Trial{trial+1:02d}_exp_{expname}_step_{train_step}_stride_{stride}.pdf"
-        plot_trajectory((traj_GT, tss_GT_us/1e6), (traj_GT, tss_GT_us/1e6), 
+        pdfname = f"{outfolder}/GT_{scene_name}_Trial{trial+1:02d}.pdf"
+        plot_trajectory((traj_GT, tss_GT_us/1e6), (traj_GT, tss_GT_us/1e6),
                         f"{dataset_name} {expname} {scene_name.replace('_', ' ')} Trial #{trial} {res_str}",
                         pdfname, align=True, correct_scale=True, max_diff_sec=max_diff_sec)
 
@@ -513,10 +513,10 @@ def log_results(data, hyperparam, all_results, results_dict_scene, figures,
 
 
 @torch.no_grad()
-def write_raw_results(all_results, outfolder):
+def write_raw_results(all_results, outfolder, train_step):
     # all_results: list of all raw_results
-    os.makedirs(os.path.join(f"{outfolder}/../raw_results"), exist_ok=True)
-    with open(os.path.join(f"{outfolder}/../raw_results", datetime.datetime.now().strftime('%m-%d-%I%p.txt')), "w") as f:
+    os.makedirs(os.path.join(f"{outfolder}/../../raw_results"), exist_ok=True)
+    with open(os.path.join(f"{outfolder}/../../raw_results", f"step_{train_step}.txt"), "w") as f:
         f.write(','.join([str(x) for x in all_results]))
 
 @torch.no_grad()

@@ -1,3 +1,12 @@
+amusement/Hard/P001
+carwelding/Easy/P001
+endofworld/Hard/P001
+hospital/Easy/P001
+japanesealley/Hard/P001
 ocean/Easy/P001
 ocean/Hard/P001
+office/Easy/P001
 office2/Hard/P001
+oldtown/Hard/P001
+seasidetown/Easy/P001
+seasonsforest/Hard/P001

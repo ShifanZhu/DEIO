@@ -82,7 +82,7 @@ def evaluate(config, args, net, train_step=None, datapath="", split_file=None,
         print(scene, sorted(results_dict_scene[scene]))
 
     # write output to file with timestamp
-    write_raw_results(all_results, outfolder)
+    write_raw_results(all_results, outfolder, train_step)
     # results_dict = compute_results(results_dict_scene, all_results, loss_dict_scene)
     results_dict = compute_median_results(results_dict_scene, all_results, dataset_name)
         
