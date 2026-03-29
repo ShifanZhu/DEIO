@@ -301,7 +301,7 @@ def train(rank, args):
                         
                         if args.eval:
                             if args.evs:
-                                from script.train_eDBA.eval_tartan_evs import evaluate as eval_tartan_evs
+                                from script.infer.eval_tartan_evs import evaluate as eval_tartan_evs
                                 # 注意改为传入参数args
                                 val_results, val_figures = eval_tartan_evs(None, args, net.module if args.ddp else net, total_steps,
                                                                         args.datapath, args.val_split, return_figure=True, plot=True, rpg_eval=False,
@@ -364,7 +364,7 @@ if __name__ == '__main__':
     parser = configargparse.ArgumentParser()
     parser.add_argument(
         '-c', '--config',
-        default='config/DEVO_base.conf',
+        default='config/train_base.conf',
         is_config_file=True,
         help='config file path',
     )

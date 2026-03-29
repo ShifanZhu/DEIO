@@ -43,7 +43,7 @@ if __name__ == '__main__':
     parser.add_argument('--inputdir', default="datasets") # 数据集的路径
     parser.add_argument('--network', type=str, default='dpvo.pth') # 网络的路径
     parser.add_argument('--val_split', type=str, default="splits") # 验证集的路径,有它来决定验证的序列
-    parser.add_argument('--config', default="config/default_devo.yaml")
+    parser.add_argument('--config', default="config/infer_base.yaml")
     parser.add_argument('--stride', type=int, default=1)
     parser.add_argument('--viz', action="store_true")
     parser.add_argument('--enable_event', action="store_true")#是否启用事件,启用了后就不会再使用图像了

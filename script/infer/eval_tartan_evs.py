@@ -25,7 +25,7 @@ def evaluate(config, args, net, train_step=None, datapath="", split_file=None,
 
     if config is None:
         config = cfg
-        config.merge_from_file("config/default_devo.yaml")
+        config.merge_from_file("config/infer_base.yaml")
 
     scenes = open(split_file).read().split()
 
