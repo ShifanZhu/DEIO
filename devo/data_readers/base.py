@@ -253,6 +253,9 @@ class EVSDDataset(data.Dataset):
         self.dataset_index = []
         for scene in self.scene_info:
             graph = self.scene_info[scene]['graph']
+            if graph is None:
+                print(f"[WARN] Skipping sequence '{scene}' because graph is None.")
+                continue
             for i in graph: # graph is dict of {frameIdx: (co-visible frames, distance)}
                 if len(graph[i][0]) > self.n_frames:
                     self.dataset_index.append((scene, i))

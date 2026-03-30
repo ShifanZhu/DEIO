@@ -19,6 +19,20 @@ Usage:
 
 # VECtor raw HDF5 (6 seqs: board_slow1 corner_slow1 desk_fast1 desk_normal1 robot_fast1 robot_normal1)
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/home/s/repos/DEIO python script/eval_deio/infer_h5.py --network /home/s/repos/SDEVO/src/SDEVO/DEVO/DEVO.pth --config config/vector.yaml --h5 /media/s/2tb-1/tro/vector_hdf5/ --gtdir /media/s/2tb-1/tro/VECtor --height 480 --width 640 --output-dir results/deio_infer/vector_raw/
+
+
+Usage on Shifan's Desktop:
+    # CEAR (events need rectification from H5 raw coords)
+    CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/home/s/repos/DEIO LD_LIBRARY_PATH=/home/s/repos/tool/miniconda3/envs/DEIO/lib:$LD_LIBRARY_PATH python script/eval_deio/infer_h5.py --network /home/s/repos/SDEVO/DEVO/DEVO.pth --config config/cear.yaml --h5 /media/s/2tb-2/deep_event_odometry/cear/indoor/ --output-dir results/deio_infer/
+
+    # MVSEC (iterator auto-selected from directory name)
+    CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/home/s/repos/DEIO LD_LIBRARY_PATH=/home/s/repos/tool/miniconda3/envs/DEIO/lib:$LD_LIBRARY_PATH python script/eval_deio/infer_h5.py --network /home/s/repos/SDEVO/DEVO/DEVO.pth --config config/mvsec.yaml --h5 /media/s/rell/deep_event_odometry/mvsec/ --height 260 --width 346 --output-dir results/deio_infer/mvsec/
+
+    # VECtor preprocessed H5 (board-slow only; iterator auto-selected from directory name)
+    CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/home/s/repos/DEIO LD_LIBRARY_PATH=/home/s/repos/tool/miniconda3/envs/DEIO/lib:$LD_LIBRARY_PATH python script/eval_deio/infer_h5.py --network /home/s/repos/SDEVO/DEVO/DEVO.pth --config config/vector.yaml --h5 /media/s/rell/deep_event_odometry/vector/ --height 480 --width 640 --output-dir results/deio_infer/vector/
+
+# VECtor raw HDF5 (6 seqs: board_slow1 corner_slow1 desk_fast1 desk_normal1 robot_fast1 robot_normal1)
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/home/s/repos/DEIO LD_LIBRARY_PATH=/home/s/repos/tool/miniconda3/envs/DEIO/lib:$LD_LIBRARY_PATH python script/eval_deio/infer_h5.py --network /home/s/repos/SDEVO/DEVO/DEVO.pth --config config/vector.yaml --h5 /media/s/2tb-1/tro/vector_hdf5/ --gtdir /media/s/2tb-1/tro/VECtor --height 480 --width 640 --output-dir results/deio_infer/vector_raw/
 """
 
 import argparse
@@ -498,6 +512,7 @@ def evaluate_sequence(
 
     # ── Event iterator ────────────────────────────────────────────────────
     if is_raw_vector:
+        print(f'Dataset type     : VECtor raw HDF5  (iterator: vector_raw)')
         iterator = vector_raw_iterator(str(h5_path), tss_frames_us,
                                        stride=stride, H=H, W=W)
     else:
@@ -507,9 +522,12 @@ def evaluate_sequence(
         PRE_UNDISTORTED = {'mvsec', 'vector'}
         path_parts = [p.lower() for p in h5_path.parts]
         if any(p in PRE_UNDISTORTED for p in path_parts):
+            matched = next(p for p in path_parts if p in PRE_UNDISTORTED)
+            print(f'Dataset type     : {matched.upper()} preprocessed H5  (iterator: mvsec/undistorted)')
             iterator = mvsec_h5_iterator(str(h5_path), stride=stride, H=H, W=W,
                                          skip_start_s=skip_start_s)
         else:
+            print(f'Dataset type     : CEAR (raw distorted coords, on-the-fly rectification)')
             iterator = cear_h5_iterator(str(h5_path), stride=stride, H=H, W=W,
                                         skip_start_s=skip_start_s)
 

@@ -175,9 +175,26 @@ def train(rank, args):
                 # fix poses to gt for first 1k steps
                 so = total_steps < (1000 // args.gpu_num) and (args.checkpoint is None or args.checkpoint == "")
 
+                # CM curriculum: activate after cm_warmup_steps, ramp weight over cm_ramp_steps
+                steps_global = total_steps // args.gpu_num
+                use_cm = steps_global >= args.cm_warmup_steps
+                if use_cm:
+                    ramp = min(1.0, (steps_global - args.cm_warmup_steps) / max(args.cm_ramp_steps, 1))
+                    cm_weight_eff = args.cm_weight * ramp
+                else:
+                    cm_weight_eff = 0.0
+
                 poses = SE3(poses).inv() # [simon]: this does c2w -> w2c (which dpvo predicts&stores internally),此处应该是真值的pose
                 with torch.amp.autocast('cuda', enabled=args.amp, dtype=torch.bfloat16):
-                    traj = net(images, poses, disps, intrinsics, M=1024, STEPS=args.iters, structure_only=so, plot_patches=DEBUG_PLOT_PATCHES, patches_per_image=args.patches_per_image)
+                    traj = net(images, poses, disps, intrinsics, M=1024, STEPS=args.iters, structure_only=so, plot_patches=DEBUG_PLOT_PATCHES, patches_per_image=args.patches_per_image,
+                               use_cm=use_cm, cm_steps=args.cm_steps, patches_per_image_cm=args.patches_per_image_cm,
+                               cm_loss_type=args.cm_loss_type, lr_cm=args.lr_cm)
+
+                # Extract CM loss when active (net returns (traj, cm_loss) tuple)
+                cm_loss = torch.as_tensor(0.0)
+                if use_cm and isinstance(traj, tuple):
+                    traj, cm_loss = traj
+
                 # list [valid, p_ij, p_ij_gt, poses, poses_gt, kl] of iters (update operator)
                 if DEBUG_PLOT_PATCHES:
                     patch_data = traj.pop()
@@ -252,6 +269,10 @@ def train(rank, args):
                     if not so and i >= 2:
                         loss += args.pose_weight * pose_loss
 
+                # CM loss (active after cm_warmup_steps, linearly ramped)
+                if use_cm:
+                    loss += cm_weight_eff * cm_loss
+
                 if rank == 0 and DEBUG_PLOT_PATCHES:
                     plot_patch_following_all(images, patch_data, evs=args.evs, outdir=f"../viz/patches_all/name_{args.name}/step_{total_steps}/")
                     plot_patch_following(images, patch_data, evs=args.evs, outdir=f"../viz/patches/name_{args.name}/step_{total_steps}/")
@@ -276,6 +297,8 @@ def train(rank, args):
                     "loss/translation_train": tr.float().mean().item(), # translation loss
                     "loss/flow_train": flow_loss.item(),                # flow loss
                     "loss/scores_train": scores_loss.item(),            # scores loss
+                    "loss/cm_train": cm_loss.item() if isinstance(cm_loss, torch.Tensor) else 0.0,
+                    "loss/cm_weight": cm_weight_eff,
                     "px1": (e < .25).float().mean().item(),             # AUC
                     "r1": (ro < .001).float().mean().item(),            #
                     "r2": (ro < .01).float().mean().item(),             #
@@ -399,6 +422,22 @@ if __name__ == '__main__':
     parser.add_argument('--dim', type=int, default=32, help='channel dimension of first layer in extractor')
     parser.add_argument('--patches_per_image', type=int, default=80, help='number of patches per image')
     parser.add_argument('--patch_selector', type=str, default="random", help='name of patch selector (random, gradient, scorer)')
+    # Contrast Maximization (CM) Stage 2 arguments
+    parser.add_argument('--cm_warmup_steps', type=int, default=10000,
+                        help='training steps before activating CM refinement')
+    parser.add_argument('--cm_ramp_steps', type=int, default=5000,
+                        help='steps over which cm_weight is linearly ramped from 0 to cm_weight after activation')
+    parser.add_argument('--cm_weight', type=float, default=0.1,
+                        help='weight of CM loss in total training loss')
+    parser.add_argument('--cm_steps', type=int, default=3,
+                        help='number of CM gradient-ascent steps per forward pass')
+    parser.add_argument('--lr_cm', type=float, default=1e-3,
+                        help='step size for CM gradient ascent')
+    parser.add_argument('--cm_loss_type', type=str, default='ncc',
+                        choices=['var_iwe', 'ncc', 'aligned_var'],
+                        help='CM loss variant: ncc (default), var_iwe, aligned_var')
+    parser.add_argument('--patches_per_image_cm', type=int, default=200,
+                        help='number of patches for CM stage (superset of patches_per_image)')
     parser.add_argument('--norm', type=str, default="rescale", help='name of norm (evs only) (none, rescale, standard)')
     parser.add_argument('--randaug', action='store_true', help='enable randAug (evs only)')
 

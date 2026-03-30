@@ -12,9 +12,9 @@ graph, poses and intrinsics are trimmed and re-indexed accordingly:
   old frames  1 .. N-1   →   new frames  0 .. N-2
 
 Usage:
-    python script/remap_fgraph_pickle.py \
-        --src  fgraph/TartanEvent.pickle \
-        --data /media/s/HDD8/data/tartan \
+    python script/pp_data/remap_fgraph_pickle.py 
+        --src  fgraph/TartanEvent.pickle 
+        --data /media/s/rell/tartan
         --dst  fgraph/TartanAirEVS.pickle
 """
 
@@ -30,9 +30,9 @@ import numpy as np
 # ──────────────────────────────────────────────────────────────────────────────
 
 def relative_key(abs_key: str, known_scenes=('ocean', 'office2',
-        'abandonedfactory', 'seasidetown', 'westerndesert', 'carwelding',
-        'endofworld', 'gascola', 'hospital', 'japanesealley', 'neighborhood',
-        'office', 'oldtown', 'soulcity', 'amusement', 'house', 'prison')):
+        'abandonedfactory', 'abandonedfactory_night', 'seasidetown', 'westerndesert', 'carwelding',
+        'endofworld', 'gascola', 'hospital', 'japanesealley', 'neighborhood', 'seasonsforest',
+        'office', 'oldtown', 'soulcity', 'amusement', 'house', 'prison', 'seasonsforest_winter')):
     """Extract 'scene/difficulty/seqnum' from an absolute pickle key."""
     parts = abs_key.rstrip('/').split('/')
     for i, p in enumerate(parts):

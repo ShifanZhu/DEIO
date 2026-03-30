@@ -595,7 +595,8 @@ class eVONet(nn.Module):
 
 
     @autocast(enabled=False)
-    def forward(self, images, poses, disps, intrinsics, M=1024, STEPS=12, P=1, structure_only=False, plot_patches=False, patches_per_image=80):
+    def forward(self, images, poses, disps, intrinsics, M=1024, STEPS=12, P=1, structure_only=False, plot_patches=False, patches_per_image=80,
+                use_cm=False, cm_steps=3, patches_per_image_cm=200, cm_loss_type='ncc', lr_cm=1e-3):
         """
         Forward pass: Event-based visual odometry with differentiable BA
 
@@ -640,6 +641,11 @@ class eVONet(nn.Module):
 
         b, n, v, h, w = images.shape
 
+        # Save raw (pre-normalization) voxels for CM Stage 2
+        # rescale/std operate in-place on views, so we must clone before normalization
+        if use_cm:
+            images_raw = images.clone()
+
         # ==== STEP 1: NORMALIZE EVENT VOXEL GRIDS ====
         # Critical preprocessing step for stable training
         if self.norm == 'none':
@@ -676,10 +682,13 @@ class eVONet(nn.Module):
         
         # ==== STEP 2: EXTRACT EVENT PATCHES AND FEATURES ====
         # This implements the patch extraction from Paper Equation (1)
+        # When CM is active, extract patches_per_image_cm (e.g. 200) total patches;
+        # Stage 1 uses the top patches_per_image (e.g. 80) within each frame.
+        patchify_n = patches_per_image_cm if use_cm else patches_per_image
         if self.patch_selector == SelectionMethod.SCORER:
-            fmap, gmap, imap, patches, ix, scores = self.patchify(images, patches_per_image=patches_per_image, disps=disps)
+            fmap, gmap, imap, patches, ix, scores = self.patchify(images, patches_per_image=patchify_n, disps=disps)
         else:
-            fmap, gmap, imap, patches, ix = self.patchify(images, patches_per_image=patches_per_image, disps=disps)
+            fmap, gmap, imap, patches, ix = self.patchify(images, patches_per_image=patchify_n, disps=disps)
 
         # Output shapes:
         # fmap: (B, N_frames, 128, H/4, W/4) - Dense matching features
@@ -687,6 +696,15 @@ class eVONet(nn.Module):
         # imap: (B, N_patches, 384, 1, 1) - Patch context features
         # patches: (B, N_patches, 3, 3, 3) - Patch coordinates [x, y, depth]
         # ix: (N_patches,) - Frame index for each patch
+
+        # Stage 1 mask: when CM is active, patchify returned patches_per_image_cm
+        # patches per frame. Stage 1 uses only the top patches_per_image (first in
+        # each frame's sorted block, since scorer sorts by score descending).
+        if use_cm:
+            within_frame = torch.arange(len(ix), device='cuda') % patchify_n
+            s1_mask = within_frame < patches_per_image  # True for Stage 1 patches
+        else:
+            s1_mask = torch.ones(len(ix), dtype=torch.bool, device='cuda')
         # Example: 15 frames * 80 patches/frame = 1200 total patches
 
         # Build correlation function for multi-scale matching
@@ -707,10 +725,10 @@ class eVONet(nn.Module):
         # ==== STEP 4: BUILD INITIAL PATCH GRAPH ====
         # Use first 8 frames for initialization (Paper mentions 8-frame initialization)
         # Create edges in the patch co-visibility graph
-        kk, jj = flatmeshgrid(torch.where(ix < 8)[0], torch.arange(0,8, device="cuda"), indexing="ij")
+        kk, jj = flatmeshgrid(torch.where((ix < 8) & s1_mask)[0], torch.arange(0,8, device="cuda"), indexing="ij")
         # kk: Patch indices (N_edges,) - which patches
         # jj: Target frame indices (N_edges,) - project patches to which frames
-        # Example: 640 patches from first 8 frames × 8 target frames = 5120 edges
+        # Example (no CM): 640 patches from first 8 frames × 8 target frames = 5120 edges
         ii = ix[kk]  # Source frame indices for each edge
 
         # Reshape context features for indexing
@@ -746,9 +764,9 @@ class eVONet(nn.Module):
 
                 # Add edges for new frame to patch graph
                 # kk1, jj1: Edges from existing patches to new frame
-                kk1, jj1 = flatmeshgrid(torch.where(ix  < n)[0], torch.arange(n, n+1, device="cuda"))
+                kk1, jj1 = flatmeshgrid(torch.where((ix  < n) & s1_mask)[0], torch.arange(n, n+1, device="cuda"))
                 # kk2, jj2: Edges from new patches to all existing frames
-                kk2, jj2 = flatmeshgrid(torch.where(ix == n)[0], torch.arange(0, n+1, device="cuda"))
+                kk2, jj2 = flatmeshgrid(torch.where((ix == n) & s1_mask)[0], torch.arange(0, n+1, device="cuda"))
 
                 # Update graph indices
                 ii = torch.cat([ix[kk1], ix[kk2], ii])
@@ -846,4 +864,39 @@ class eVONet(nn.Module):
         # Each element in traj contains supervision signals for one iteration
         if plot_patches:
             traj.append(plot_data)
+
+        # ==== STAGE 2: CONTRAST MAXIMIZATION REFINEMENT ====
+        if use_cm:
+            from .cm_refinement import cm_refine
+
+            # n at this point is the number of frames used in the final iteration
+            n_final = ii.max().item() + 1
+
+            # Build CM edges: all patches_per_image_cm patches × all active frames
+            # (patches already have depths initialized via the main loop's median init)
+            kk_cm_all, jj_cm_all = flatmeshgrid(
+                torch.arange(len(ix), device='cuda'),
+                torch.arange(n_final, device='cuda'),
+                indexing='ij'
+            )
+            ii_cm_all = ix[kk_cm_all]
+            # Remove self-edges (source frame == target frame)
+            valid_cm = ii_cm_all != jj_cm_all
+            ii_cm = ii_cm_all[valid_cm]
+            jj_cm = jj_cm_all[valid_cm]
+            kk_cm = kk_cm_all[valid_cm]
+
+            b_fm, n_fm, c_fm, h_fm, w_fm = fmap.shape
+
+            # cm_refine: training signal via cm_loss at current Gs (gradient flows
+            # through Gs → last BA iteration → Update operator → model parameters)
+            Gs_cm, cm_loss = cm_refine(
+                Gs, images_raw, patches.detach(),
+                intrinsics, ii_cm, jj_cm, kk_cm,
+                h=h_fm, w=w_fm,
+                cm_steps=cm_steps, lr_cm=lr_cm, cm_loss_type=cm_loss_type,
+            )
+
+            return traj, cm_loss
+
         return traj
