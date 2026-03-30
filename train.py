@@ -124,9 +124,9 @@ def train(rank, args):
     total_steps = 0
 
     # 如果有checkpoint，加载checkpoint
-    if args.checkpoint is not None and args.checkpoint != '':
-        print(f"Loading from {args.checkpoint}")
-        checkpoint = torch.load(args.checkpoint)
+    if args.resume is not None and args.resume != '':
+        print(f"Loading from {args.resume}")
+        checkpoint = torch.load(args.resume)
         model = net.module if args.ddp else net
         if 'model_state_dict' in checkpoint:
             model.load_state_dict(checkpoint['model_state_dict'])
@@ -164,7 +164,7 @@ def train(rank, args):
             with_stack=True
         ) if args.profiler else contextlib.nullcontext() as prof:
         if rank == 0:
-            pbar = tqdm(total=args.gpu_num * args.steps, desc=f"Training {args.name}")
+            pbar = tqdm(total=args.gpu_num * args.steps, initial=args.gpu_num * total_steps, desc=f"Training {args.name}")
         while True:
             # training loop
             for data_blob in train_loader:
@@ -173,7 +173,7 @@ def train(rank, args):
                 optimizer.zero_grad(set_to_none=True)
 
                 # fix poses to gt for first 1k steps
-                so = total_steps < (1000 // args.gpu_num) and (args.checkpoint is None or args.checkpoint == "")
+                so = total_steps < (1000 // args.gpu_num) and (args.resume is None or args.resume == "")
 
                 # CM curriculum: activate after cm_warmup_steps, ramp weight over cm_ramp_steps
                 steps_global = total_steps // args.gpu_num
@@ -366,9 +366,9 @@ def assert_config(args):
     assert args.n_frames > 7 and args.n_frames < 100 #  The first 8 frames are used for initialization while the next n_frames-8 frames are added one at a time
     assert args.pose_weight >= 0 and args.pose_weight <= 100 and args.flow_weight >= 0 and args.flow_weight <= 100
 
-    if args.checkpoint is not None and args.checkpoint != '':
-        assert os.path.isfile(args.checkpoint)
-        assert ".pth" in args.checkpoint or ".pt" in args.checkpoint 
+    if args.resume is not None and args.resume != '':
+        assert os.path.isfile(args.resume)
+        assert ".pth" in args.resume or ".pt" in args.resume 
     if args.fgraph_pickle is not None and args.fgraph_pickle != '':
         assert os.path.isfile(args.fgraph_pickle)
         assert ".pickle" in args.fgraph_pickle
@@ -392,7 +392,7 @@ if __name__ == '__main__':
         help='config file path',
     )
     parser.add_argument('--name', '--expname', default='bla', help='name your experiment')#实验的名字
-    parser.add_argument('--checkpoint', type=str, default=None, help='checkpoint to restore')
+    parser.add_argument('--resume', type=str, default=None, help='checkpoint to resume from')
     parser.add_argument('--fgraph_pickle', type=str, default="TartanAirEVS.pickle", help='precomputed frame graph (copied to expdir)')
     parser.add_argument('--datapath', default='', help='path to dataset directory')
     parser.add_argument('--batch', type=int, default=1)
