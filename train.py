@@ -188,7 +188,7 @@ def train(rank, args):
                 with torch.amp.autocast('cuda', enabled=args.amp, dtype=torch.bfloat16):
                     traj = net(images, poses, disps, intrinsics, M=1024, STEPS=args.iters, structure_only=so, plot_patches=DEBUG_PLOT_PATCHES, patches_per_image=args.patches_per_image,
                                use_cm=use_cm, cm_steps=args.cm_steps, patches_per_image_cm=args.patches_per_image_cm,
-                               cm_loss_type=args.cm_loss_type, lr_cm=args.lr_cm)
+                               cm_loss_type=args.cm_loss_type, lr_cm=args.lr_cm, use_depth_init=args.use_depth_init)
 
                 # Extract CM loss when active (net returns (traj, cm_loss) tuple)
                 cm_loss = torch.as_tensor(0.0)
@@ -440,6 +440,8 @@ if __name__ == '__main__':
                         help='number of patches for CM stage (superset of patches_per_image)')
     parser.add_argument('--norm', type=str, default="rescale", help='name of norm (evs only) (none, rescale, standard)')
     parser.add_argument('--randaug', action='store_true', help='enable randAug (evs only)')
+    parser.add_argument('--use_depth_init', action='store_true',
+                        help='initialize patch depths from GT depth (+ 10%% noise) instead of random')
 
 
     parser.add_argument('--resnet', action='store_true', help='use the ResNet backbone')

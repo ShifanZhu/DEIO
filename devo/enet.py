@@ -596,7 +596,7 @@ class eVONet(nn.Module):
 
     @autocast(enabled=False)
     def forward(self, images, poses, disps, intrinsics, M=1024, STEPS=12, P=1, structure_only=False, plot_patches=False, patches_per_image=80,
-                use_cm=False, cm_steps=3, patches_per_image_cm=200, cm_loss_type='ncc', lr_cm=1e-3):
+                use_cm=False, cm_steps=3, patches_per_image_cm=200, cm_loss_type='ncc', lr_cm=1e-3, use_depth_init=False):
         """
         Forward pass: Event-based visual odometry with differentiable BA
 
@@ -718,9 +718,15 @@ class eVONet(nn.Module):
         Ps = poses  # Ground truth poses
 
         # ==== STEP 3: INITIALIZE DEPTH ====
-        # Initialize patch depths randomly (will be optimized)
         d = patches[..., 2, p//2, p//2]  # Extract center depth
-        patches = set_depth(patches, torch.rand_like(d))  # Random initialization
+        if use_depth_init:
+            # Initialize from GT depth with 10% multiplicative noise.
+            # Noise prevents zero BA residual at iter 0 (which would zero update-network gradients).
+            d_gt = patches_gt[..., 2, p//2, p//2]
+            noise = 1.0 + 0.1 * torch.randn_like(d_gt)
+            patches = set_depth(patches, (d_gt * noise).clamp(min=0.01))
+        else:
+            patches = set_depth(patches, torch.rand_like(d))
 
         # ==== STEP 4: BUILD INITIAL PATCH GRAPH ====
         # Use first 8 frames for initialization (Paper mentions 8-frame initialization)
