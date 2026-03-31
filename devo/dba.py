@@ -27,6 +27,12 @@ import devo.geoFunc.trans as trans
 import copy
 import bisect
 
+from .tracking_filters import (
+    build_event_support_maps,
+    ransac_epipolar_inlier_mask,
+    supported_track_mask,
+)
+
 # Short version: they are three backend levels of complexity.
 
 # devo.py: baseline DEVO visual odometry backend; pure event-visual tracking + local sliding-window BA, no GTSAM IMU fusion.
@@ -178,6 +184,8 @@ class DBA:
         self.plt_pos_ref = [[],[]]    # X, Y
         self.refTw       = np.eye(4,4)
         self.poses_save   = [] # 记录位姿
+        self.cur_event_support_mass_map = None
+        self.cur_event_support_count_map = None
 
 
     # 用于设置prior_factor_map
@@ -358,13 +366,77 @@ class DBA:
         coords = pops.transform(SE3(self.poses), self.patches, self.intrinsics, ii, jj, kk)
         return coords.permute(0, 1, 4, 2, 3).contiguous()
 
+    def _track_filters_enabled(self):
+        return bool(getattr(self.cfg, "ENABLE_DBA_TRACK_FILTERS", True))
+
+    def _patch_valid_mask_for_kk(self, kk):
+        if kk.numel() == 0:
+            return torch.zeros((0,), dtype=torch.bool, device=kk.device)
+        frame_idx = torch.div(kk, self.M, rounding_mode='floor')
+        slot_idx = kk % self.M
+        return self.pg.patch_valid_[frame_idx, slot_idx]
+
+    def _kk_membership_mask(self, values, candidates):
+        if values.numel() == 0 or candidates.numel() == 0:
+            return torch.zeros(values.shape, dtype=torch.bool, device=values.device)
+        return (values[:, None] == candidates[None, :]).any(dim=1)
+
+    def _remove_inactive_factors_by_kk(self, invalid_kk):
+        inactive_remove = self._kk_membership_mask(self.pg.kk_inac, invalid_kk)
+        if inactive_remove.any():
+            self.pg.ii_inac = self.pg.ii_inac[~inactive_remove]
+            self.pg.jj_inac = self.pg.jj_inac[~inactive_remove]
+            self.pg.kk_inac = self.pg.kk_inac[~inactive_remove]
+            self.pg.weight_inac = self.pg.weight_inac[:, ~inactive_remove]
+            self.pg.target_inac = self.pg.target_inac[:, ~inactive_remove]
+
+    def _invalidate_patch_slots(self, invalid_kk):
+        invalid_kk = torch.unique(invalid_kk.long())
+        if invalid_kk.numel() == 0:
+            return torch.ones(self.pg.kk.shape[0], dtype=torch.bool, device="cuda")
+
+        frame_idx = torch.div(invalid_kk, self.M, rounding_mode='floor')
+        slot_idx = invalid_kk % self.M
+        self.pg.patch_valid_[frame_idx, slot_idx] = False
+        self.pg.points_[invalid_kk] = 0
+
+        active_remove = self._kk_membership_mask(self.pg.kk, invalid_kk)
+        if active_remove.any():
+            self.remove_factors(active_remove, store=False)
+
+        self._remove_inactive_factors_by_kk(invalid_kk)
+        return ~active_remove
+
+    def _refresh_points_cache(self):
+        if self.m == 0:
+            self.pg.points_.zero_()
+            return
+
+        points = pops.point_cloud(SE3(self.poses), self.patches[:, :self.m], self.intrinsics, self.ix[:self.m])
+        points = (points[...,1,1,:3] / points[...,1,1,3:]).reshape(-1, 3)
+        points = points.clone()
+        valid = self.pg.patch_valid_.view(-1)[:self.m]
+        points[~valid] = 0
+        self.pg.points_[:self.m] = points
+        if self.pg.points_.shape[0] > self.m:
+            self.pg.points_[self.m:] = 0
+
     def append_factors(self, ii, jj):
+        valid = self._patch_valid_mask_for_kk(ii)
+        if not valid.any():
+            return
+        if (~valid).any():
+            ii = ii[valid]
+            jj = jj[valid]
+
         self.pg.jj = torch.cat([self.pg.jj, jj])
         self.pg.kk = torch.cat([self.pg.kk, ii])#插入的ii其实就是patch的索引，kk
         self.pg.ii = torch.cat([self.pg.ii, self.ix[ii]]) #self.ix[ii]也就是self.ix[kk]才是ii的索引
 
         net = torch.zeros(1, len(ii), self.dim_inet, **self.kwargs)
         self.pg.net = torch.cat([self.pg.net, net], dim=1)
+        self.pg.target = torch.cat([self.pg.target, torch.zeros(1, len(ii), 2, device="cuda", dtype=torch.float32)], dim=1)
+        self.pg.weight = torch.cat([self.pg.weight, torch.zeros(1, len(ii), 2, device="cuda", dtype=torch.float32)], dim=1)
 
     def remove_factors(self, m, store: bool):
         assert self.pg.ii.numel() == self.pg.weight.shape[1]
@@ -386,6 +458,10 @@ class DBA:
     def motion_probe(self):
         """ kinda hacky way to ensure enough motion for initialization """
         kk = torch.arange(self.m-self.M, self.m, device="cuda")
+        valid = self._patch_valid_mask_for_kk(kk)
+        kk = kk[valid]
+        if kk.numel() == 0:
+            return torch.tensor(0.0, device="cuda")
         jj = self.n * torch.ones_like(kk)
         ii = self.ix[kk]
 
@@ -405,6 +481,8 @@ class DBA:
         ii = self.pg.ii[k]
         jj = self.pg.jj[k]
         kk = self.pg.kk[k]
+        if kk.numel() == 0:
+            return 0.0
 
         # flow, _ = pops.flow_mag(SE3(self.poses), self.patches, self.intrinsics, ii, jj, kk, beta=0.5)
         flow = pops.flow_mag(SE3(self.poses), self.patches, self.intrinsics, ii, jj, kk, beta=0.5)
@@ -442,6 +520,7 @@ class DBA:
                 self.pg.patches_[i] = self.pg.patches_[i+1]
                 self.patches_gt_[i] = self.patches_gt_[i+1]
                 self.pg.intrinsics_[i] = self.pg.intrinsics_[i+1]
+                self.pg.patch_valid_[i] = self.pg.patch_valid_[i+1]
 
                 self.imap_[i % self.pmem] = self.imap_[(i+1) % self.pmem]
                 self.gmap_[i % self.pmem] = self.gmap_[(i+1) % self.pmem]
@@ -467,6 +546,8 @@ class DBA:
 
             self.n -= 1 #由于删掉了一帧，所以往前挪一帧
             self.m-= self.M #减去这些patch获得总的patch数量
+            self.pg.patch_valid_[self.n].fill_(False if self._track_filters_enabled() else True)
+            self.pg.points_[self.m:self.m + self.M] = 0
 
             if self.cfg.CLASSIC_LOOP_CLOSURE:
                 self.long_term_lc.keyframe(k)
@@ -689,7 +770,16 @@ class DBA:
         del bafactor #释放内存
 
     def update(self):
+        if self.pg.ii.numel() == 0:
+            self.pg.target = self.pg.target[:, :0]
+            self.pg.weight = self.pg.weight[:, :0]
+            self.last_t0 = max(self.n - self.cfg.OPTIMIZATION_WINDOW, 1) if self.n > 0 else 0
+            self.last_t1 = self.n
+            self._refresh_points_cache()
+            return
+
         coords = self.reproject()#进行重投影
+        coords_center = coords[...,self.P//2,self.P//2]
 
         with autocast(enabled=True):
             corr = self.corr(coords) #计算相关性，获取当前帧与上一帧之间的特征匹配信息。
@@ -699,10 +789,61 @@ class DBA:
 
         lmbda = torch.as_tensor([1e-4], device="cuda")
         weight = weight.float()
-        target = coords[...,self.P//2,self.P//2] + delta.float()
+        target = coords_center + delta.float()
+
+        if self._track_filters_enabled() and self.evs and getattr(self.cfg, "ENABLE_EVENT_SUPPORT_FILTER", False):
+            newest_mask = (self.pg.jj == (self.n - 1))
+            if newest_mask.any() and self.cur_event_support_mass_map is not None and self.cur_event_support_count_map is not None:
+                support_keep = supported_track_mask(
+                    target[0, newest_mask],
+                    self.cur_event_support_mass_map,
+                    self.cur_event_support_count_map,
+                    getattr(self.cfg, "MIN_EVENT_SUPPORT", 4.0),
+                    getattr(self.cfg, "MIN_EVENT_PIXELS", 4.0),
+                )
+                if (~support_keep).any():
+                    invalid_kk = self.pg.kk[newest_mask][~support_keep]
+                    active_keep = self._invalidate_patch_slots(invalid_kk)
+                    coords_center = coords_center[:, active_keep]
+                    target = target[:, active_keep]
+                    weight = weight[:, active_keep]
+                    removed = int(torch.unique(invalid_kk).numel())
+                    print(
+                        f"DBA support prune removed {removed} patch slots on frame {self.n - 1} "
+                        f"(< {float(getattr(self.cfg, 'MIN_EVENT_SUPPORT', 4.0)):g} event support or "
+                        f"< {float(getattr(self.cfg, 'MIN_EVENT_PIXELS', 4.0)):g} active pixels)"
+                    )
+
+        if self._track_filters_enabled() and getattr(self.cfg, "ENABLE_RANSAC_FILTER", False) and self.n >= 2:
+            newest_pair_mask = (self.pg.ii == (self.n - 2)) & (self.pg.jj == (self.n - 1))
+            if newest_pair_mask.any():
+                intrinsics_full = self.pg.intrinsics_[self.n - 1] * float(self.RES)
+                inliers = ransac_epipolar_inlier_mask(
+                    coords_center[0, newest_pair_mask],
+                    target[0, newest_pair_mask],
+                    intrinsics_full,
+                    getattr(self.cfg, "RANSAC_REPROJ_THRESH", 3e-3),
+                    getattr(self.cfg, "RANSAC_CONFIDENCE", 0.99),
+                    getattr(self.cfg, "RANSAC_MIN_POINTS", 8),
+                    getattr(self.cfg, "RANSAC_MIN_INLIERS", 8),
+                )
+                if (~inliers).any():
+                    invalid_kk = self.pg.kk[newest_pair_mask][~inliers]
+                    active_keep = self._invalidate_patch_slots(invalid_kk)
+                    coords_center = coords_center[:, active_keep]
+                    target = target[:, active_keep]
+                    weight = weight[:, active_keep]
+                    removed = int(torch.unique(invalid_kk).numel())
+                    print(f"DBA RANSAC removed {removed} inconsistent patch slots on frame {self.n - 1}")
 
         self.pg.target = target
         self.pg.weight = weight
+
+        if self.pg.ii.numel() == 0:
+            self.last_t0 = max(self.n - self.cfg.OPTIMIZATION_WINDOW, 1) if self.n > 0 else 0
+            self.last_t1 = self.n
+            self._refresh_points_cache()
+            return
 
         # Bundle adjustment进行BA优化
         with Timer("BA", enabled=self.enable_timing):
@@ -756,15 +897,18 @@ class DBA:
                 print("Warning BA failed...")
             
             # 更新点云
-            points = pops.point_cloud(SE3(self.poses), self.patches[:, :self.m], self.intrinsics, self.ix[:self.m])
-            points = (points[...,1,1,:3] / points[...,1,1,3:]).reshape(-1, 3)
-            self.pg.points_[:len(points)] = points[:]
+            self._refresh_points_cache()
 
     def flow_viz_step(self):
         # [DEBUG]
         # dij = (self.ii - self.jj).abs()
         # assert (dij==0).sum().item() == len(torch.unique(self.kk)) 
         # [DEBUG]
+        if self.pg.ii.numel() == 0:
+            empty_coords = torch.zeros((1, 0, self.P, self.P, 2), device="cuda", dtype=torch.float32)
+            self.flow_data[self.counter-1] = {"ii": self.pg.ii, "jj": self.pg.jj, "kk": self.pg.kk,\
+                                          "coords_est": empty_coords, "img": self.image_, "n": self.n}
+            return
 
         coords_est = pops.transform(SE3(self.poses), self.patches, self.intrinsics,
                                     self.pg.ii, self.pg.jj, self.pg.kk) # p_ij (B,close_edges,P,P,2)
@@ -1253,6 +1397,7 @@ class DBA:
         if self.viz_flow:
             self.image_ = image.detach().cpu().permute((1, 2, 0)).numpy()
 
+        raw_event_voxel = image if self.evs else None
         if not self.evs:#如果不使用事件,就是正常的图像归一化操作
             image = 2 * (image[None,None] / 255.0) - 0.5 
         else:
@@ -1314,6 +1459,12 @@ class DBA:
         if image.shape[-1] == 346:
             image = image[..., 1:-1] # hack for MVSEC, FPV,...
 
+        if self._track_filters_enabled() and self.evs and getattr(self.cfg, "ENABLE_EVENT_SUPPORT_FILTER", False):
+            self.cur_event_support_mass_map, self.cur_event_support_count_map = build_event_support_maps(raw_event_voxel, self.P)
+        else:
+            self.cur_event_support_mass_map = None
+            self.cur_event_support_count_map = None
+
         disps_sensor = None
         if depth is not None:
             depth_ds = depth[1::4, 1::4].clamp(min=0.01)  # stride-4 to match training (enet.py:681)
@@ -1336,6 +1487,7 @@ class DBA:
         self.tlist.append(tstamp)#时间戳，全局时间的时间戳
         self.pg.tstamps_[self.n] = self.counter#只是数字，统计的为关键帧对应的全局时间的索引
         self.pg.intrinsics_[self.n] = intrinsics / self.RES
+        self.pg.patch_valid_[self.n].fill_(False if self._track_filters_enabled() else True)
         
         # color info for visualization
         if not self.evs:
@@ -1374,6 +1526,27 @@ class DBA:
             patches[:,:,2] = torch.rand_like(patches[:,:,2,0,0,None,None])
 
         self.pg.patches_[self.n] = patches
+        init_valid = torch.ones(self.M, dtype=torch.bool, device="cuda")
+        if self._track_filters_enabled() and self.evs and getattr(self.cfg, "ENABLE_EVENT_SUPPORT_FILTER", False):
+            init_centers = patches[0, :, :2, self.P//2, self.P//2]
+            init_valid = supported_track_mask(
+                init_centers,
+                self.cur_event_support_mass_map,
+                self.cur_event_support_count_map,
+                getattr(self.cfg, "MIN_EVENT_SUPPORT", 4.0),
+                getattr(self.cfg, "MIN_EVENT_PIXELS", 4.0),
+            )
+            dropped = int((~init_valid).sum().item())
+            if dropped > 0:
+                print(
+                    f"DBA init prune removed {dropped} unsupported patch slots on frame {self.n} "
+                    f"(< {float(getattr(self.cfg, 'MIN_EVENT_SUPPORT', 4.0)):g} event support or "
+                    f"< {float(getattr(self.cfg, 'MIN_EVENT_PIXELS', 4.0)):g} active pixels)"
+                )
+        self.pg.patch_valid_[self.n] = init_valid
+        invalid_slots = torch.where(~init_valid)[0]
+        if invalid_slots.numel() > 0:
+            self.pg.points_[self.n * self.M + invalid_slots] = 0
 
         ### update network attributes ###
         self.imap_[self.n % self.pmem] = imap.squeeze()

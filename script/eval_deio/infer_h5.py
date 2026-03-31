@@ -777,6 +777,8 @@ def main():
     parser.add_argument('--skip-done',   action='store_true',
                         help='Skip sequences whose _errors.csv already exists in --output-dir')
     parser.add_argument('--timing',      action='store_true')
+    parser.add_argument('--disable-dba-track-filters', action='store_true',
+                        help='Disable DBA event-support pruning and RANSAC and use the original backend behavior')
     parser.add_argument('--opts',        nargs='+', default=[],
                         help='Extra DEIO cfg overrides (key val ...)')
     parser.add_argument('--resnet',      action='store_true')
@@ -791,6 +793,8 @@ def main():
     DEIO_CFG.block_dims  = list(map(int, args.block_dims.split(',')))
     DEIO_CFG.initial_dim = args.initial_dim
     DEIO_CFG.pretrain    = args.pretrain
+    if args.disable_dba_track_filters:
+        DEIO_CFG.ENABLE_DBA_TRACK_FILTERS = False
     assert not DEIO_CFG.CLASSIC_LOOP_CLOSURE
     print('\033[42m DEIO infer_h5 \033[0m  config loaded')
     print(DEIO_CFG, '\n')
@@ -847,7 +851,7 @@ def main():
             no_plot      = args.no_plot,
             dataset_name = dataset_name,
             timing       = args.timing,
-            skip_start_s = args.skip-start,
+            skip_start_s = args.skip_start,
             gtdir        = args.gtdir,
         )
         all_results.append(result)

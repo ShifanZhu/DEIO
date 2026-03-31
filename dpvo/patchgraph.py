@@ -30,6 +30,7 @@ class PatchGraph:
 
         self.points_ = torch.zeros(self.N * self.M, 3, dtype=torch.float, device="cuda")
         self.colors_ = torch.zeros(self.N, self.M, 3, dtype=torch.uint8, device="cuda")
+        self.patch_valid_ = torch.ones(self.N, self.M, dtype=torch.bool, device="cuda")
 
         self.index_ = torch.zeros(self.N, self.M, dtype=torch.long, device="cuda")
         self.index_map_ = torch.zeros(self.N, dtype=torch.long, device="cuda")
@@ -45,6 +46,8 @@ class PatchGraph:
         self.ii = torch.as_tensor([], dtype=torch.long, device="cuda")
         self.jj = torch.as_tensor([], dtype=torch.long, device="cuda")
         self.kk = torch.as_tensor([], dtype=torch.long, device="cuda")
+        self.weight = torch.zeros(1, 0, 2, dtype=torch.float, device="cuda")
+        self.target = torch.zeros(1, 0, 2, dtype=torch.float, device="cuda")
 
         ### inactive edge information (i.e., no longer updated, but useful for BA) ###
         self.ii_inac = torch.as_tensor([], dtype=torch.long, device="cuda")
