@@ -1,0 +1,28 @@
+# DEIO LCM Server Configuration
+# CLI arguments override these values.
+
+# LCM transport URL. Empty string = default UDP multicast.
+# Example for cross-host: "udpm://239.255.76.67:7667?ttl=1"
+LCM_URL: ""
+
+# Channel names
+LCM_INPUT_CHANNEL:  "DEIO_TIMESTAMPS"
+LCM_OUTPUT_CHANNEL: "DEIO_DELTA_POSE"
+
+# Camera intrinsics [fx, fy, cx, cy]
+INTRINSICS: [320.0, 320.0, 320.0, 240.0]
+
+# Image dimensions
+IMG_HEIGHT: 480
+IMG_WIDTH:  640
+
+# Number of voxel time bins
+VOXEL_BINS: 5
+
+# Hot pixel filter
+HOT_PIXEL_FILTER: true
+HOT_PIXEL_STDS:   10
+
+# Optional path to rectify_map_{side}.h5 for lens undistortion.
+# Leave empty if events are already rectified.
+RECTIFY_MAP_FILE: ""

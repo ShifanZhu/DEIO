@@ -1849,7 +1849,13 @@ def vector_preprocessed_h5_iterator(h5_path, stride=1, H=480, W=640, skip_start_
     tss_us      = f['frames/depth_t_us'][:]           # (F,)      int64
     f.close()
 
-    n_frames = len(tss_us)
+    n_frames = min(len(time_images), len(tss_us))
+    if len(time_images) != len(tss_us):
+        print(
+            f"Warning: VECTOR-preprocessed H5 length mismatch for {h5_path}: "
+            f"time_images={len(time_images)} vs depth_t_us={len(tss_us)}. "
+            f"Using first {n_frames} entries."
+        )
 
     data_list = []
     for i in range(0, n_frames, stride):

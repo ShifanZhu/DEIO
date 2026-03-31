@@ -766,8 +766,9 @@ class DBA:
         # assert (dij==0).sum().item() == len(torch.unique(self.kk)) 
         # [DEBUG]
 
-        coords_est = pops.transform(SE3(self.poses), self.patches, self.intrinsics, self.ii, self.jj, self.kk) # p_ij (B,close_edges,P,P,2)
-        self.flow_data[self.counter-1] = {"ii": self.ii, "jj": self.jj, "kk": self.kk,\
+        coords_est = pops.transform(SE3(self.poses), self.patches, self.intrinsics,
+                                    self.pg.ii, self.pg.jj, self.pg.kk) # p_ij (B,close_edges,P,P,2)
+        self.flow_data[self.counter-1] = {"ii": self.pg.ii, "jj": self.pg.jj, "kk": self.pg.kk,\
                                           "coords_est": coords_est, "img": self.image_, "n": self.n}
 
         # import matplotlib.pyplot as plt
@@ -1101,15 +1102,22 @@ class DBA:
             tmp_g = self.state.preintegrations[i].deltaVij()/dt
             sum_g += tmp_g
             ccount += 1
+        if ccount == 0:
+            print("IMU initialization skipped: no preintegration samples")
+            return
         aver_g = sum_g * 1.0 / ccount
+        if not np.isfinite(aver_g).all():
+            print("IMU initialization skipped: non-finite average gravity", aver_g)
+            return
         var_g = 0.0
         for i in range(self.t1 - 8 ,self.t1-1):
             dt = self.state.preintegrations[i].deltaTij()
             tmp_g = self.state.preintegrations[i].deltaVij()/dt
             var_g += np.linalg.norm(tmp_g - aver_g)**2
         var_g =math.sqrt(var_g/ccount)
-        if var_g < 0.25: #若方差小于0.25,就证明IMU的激励不够
+        if (not np.isfinite(var_g)) or var_g < 0.25: #若方差小于0.25,就证明IMU的激励不够
             print("IMU excitation not enough!",var_g)
+            return
         else:
             poses = SE3(self.pg.poses_)
             self.plt_pos = [[],[]]
@@ -1124,19 +1132,24 @@ class DBA:
                     self.plt_pos_ref[1].append(dd['T'][1,3])     
 
             if not self.visual_only:#如果有IMU
-                self.VisualIMUAlignment(self.t1 - 8 ,self.t1, ignore_lever= True)
-                self.update()#更新图
-                self.VisualIMUAlignment(self.t1 - 8 ,self.t1, ignore_lever= False)
-                self.update()#更新图
-                self.VisualIMUAlignment(self.t1 - 8 ,self.t1, ignore_lever= False)
+                try:
+                    self.VisualIMUAlignment(self.t1 - 8 ,self.t1, ignore_lever= True)
+                    self.update()#更新图
+                    self.VisualIMUAlignment(self.t1 - 8 ,self.t1, ignore_lever= False)
+                    self.update()#更新图
+                    self.VisualIMUAlignment(self.t1 - 8 ,self.t1, ignore_lever= False)
+                except Exception as exc:
+                    print(f"IMU initialization failed, will retry later: {exc}")
+                    self.imu_enabled = False
+                    return
                 self.imu_enabled = True #完成视觉惯性对齐后再开启IMU(之后BA update中才会用到imu了~)
             else:#下面不用管
                 # 报错
                 raise ValueError("Visual only initialization in init_VI???")
                 self.visual_only_init = True #只用视觉，不用imu
-
+ 
             self.set_prior(self.last_t0,self.t1)
-
+ 
             self.plt_pos = [[],[]]
             self.plt_pos_ref = [[],[]]
             for i in range(0,self.t1):

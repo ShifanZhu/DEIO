@@ -783,7 +783,6 @@ def main():
     parser.add_argument('--block-dims',  type=str, default='64,128,256')
     parser.add_argument('--initial-dim', type=int, default=64)
     parser.add_argument('--pretrain',    type=str, default='resnet18')
-    parser.add_argument('--skip_start',  type=int, default=0)
     args = parser.parse_args()
 
     DEIO_CFG.merge_from_file(args.config)
@@ -848,7 +847,7 @@ def main():
             no_plot      = args.no_plot,
             dataset_name = dataset_name,
             timing       = args.timing,
-            skip_start_s = args.skip_start,
+            skip_start_s = args.skip-start,
             gtdir        = args.gtdir,
         )
         all_results.append(result)

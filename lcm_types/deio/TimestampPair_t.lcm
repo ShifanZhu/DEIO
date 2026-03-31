@@ -1,0 +1,9 @@
+package deio;
+
+// Sent by the external algorithm to request delta pose estimation.
+// t0_us and t1_us define the event window to process (~100ms gap expected).
+struct TimestampPair_t {
+    int64_t utime;    // wall-clock time of this request (us), echoed back for pairing
+    int64_t t0_us;    // event window start timestamp (microseconds)
+    int64_t t1_us;    // event window end timestamp (microseconds)
+}

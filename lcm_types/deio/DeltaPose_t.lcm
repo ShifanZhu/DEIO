@@ -1,0 +1,29 @@
+package deio;
+
+// Published by the DEIO server in response to a TimestampPair_t request.
+//
+// Pose convention: delta = T_wc(t1) * T_wc(t0).inv()
+//   where T_wc is the world-to-camera transform stored internally by DEVO.
+//   This represents the relative change in the world-to-camera transform
+//   from frame t0 to frame t1.
+//
+// Quaternion format: [qx, qy, qz, qw] (xyzw, unit quaternion).
+//
+// Status codes:
+//   0 = valid pose
+//   1 = not_initialized (< 8 keyframes seen; identity pose published)
+//   2 = no_events (no events found in [t0_us, t1_us]; identity pose published)
+//   3 = pose_error (internal error retrieving pose; identity pose published)
+struct DeltaPose_t {
+    int64_t utime;    // echoed from the request
+    int64_t t0_us;    // echoed event window start
+    int64_t t1_us;    // echoed event window end
+    int8_t  status;   // 0=valid 1=not_initialized 2=no_events 3=pose_error
+    double  tx;
+    double  ty;
+    double  tz;
+    double  qx;
+    double  qy;
+    double  qz;
+    double  qw;
+}

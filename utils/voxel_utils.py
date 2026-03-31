@@ -22,6 +22,7 @@ def std(voxs, sequence=True):
 
         mean = torch.sum(flatten_voxs, dim=-1, dtype=torch.float32) / num_nonzeros  # force torch.float32 to prevent overflows when using 16-bit precision
         stddev = torch.sqrt(torch.sum(flatten_voxs ** 2, dim=-1, dtype=torch.float32) / num_nonzeros - mean ** 2)
+        stddev = stddev.clamp_min(torch.finfo(stddev.dtype).eps)
         mask = nonzero_ev.type_as(flatten_voxs)
         flatten_voxs = mask * (flatten_voxs - mean[...,None]) / stddev[...,None]
     
@@ -39,8 +40,8 @@ def rescale(voxs, sequence=True):
     
     pos = flatten_voxs > 0.0
     neg = flatten_voxs < 0.0
-    vx_max = torch.Tensor([1e-5], device="cuda") if pos.sum().item() == 0 else flatten_voxs[pos].max(dim=-1)[0]
-    vx_min = torch.Tensor([1e-5], device="cuda") if neg.sum().item() == 0 else flatten_voxs[neg].min(dim=-1)[0]
+    vx_max = flatten_voxs.new_tensor([1e-5]) if pos.sum().item() == 0 else flatten_voxs[pos].max(dim=-1)[0]
+    vx_min = flatten_voxs.new_tensor([1e-5]) if neg.sum().item() == 0 else flatten_voxs[neg].min(dim=-1)[0]
     # [DEBUG]
     # print("vx_max", vx_max.item())
     # print("vx_min", vx_min.item())

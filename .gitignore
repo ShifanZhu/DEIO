@@ -21,3 +21,8 @@ thirdparty
 runs
 logs
 *.pickle
+
+config/cache
+config/codex.sqlite3
+config/hypercorn.toml
+config/secret_key
