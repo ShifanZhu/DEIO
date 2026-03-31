@@ -452,7 +452,7 @@ def build_absolute_trajectory(records: list, T_abs_gt: list):
 def evaluate_sequence(
     h5_path:      Path,
     deio_cfg,
-    network:      str,
+    network,
     stride:       int       = 1,
     H:            int       = 240,
     W:            int       = 320,
@@ -468,6 +468,7 @@ def evaluate_sequence(
 
     # ── Detect raw VECtor HDF5 (*.hdf5, GT/IMU loaded from txt) ─────────
     is_raw_vector = h5_path.suffix == '.hdf5'
+    print(f"is_raw_vector: {is_raw_vector}  (h5_path: {h5_path})")
 
     if is_raw_vector:
         # Stem e.g. 'desk_fast1.synced.left_event' → seq_name 'desk_fast1'
@@ -799,6 +800,29 @@ def main():
         sys.exit(1)
     print(f'Found {len(h5_files)} H5 file(s) to evaluate.')
 
+    # Load network weights once, reuse across all sequences
+    from devo.enet import eVONet
+    from collections import OrderedDict
+    print(f'Loading network from {args.network}')
+    checkpoint = torch.load(args.network, weights_only=False)
+    if 'model_state_dict' in checkpoint:
+        state_dict = checkpoint['model_state_dict']
+    else:
+        state_dict = OrderedDict(
+            (k.replace('module.', ''), v)
+            for k, v in checkpoint.items()
+            if 'update.lmbda' not in k
+        )
+    # infer dims from the state dict so we don't hardcode architecture
+    dim_inet = state_dict['patchify.inet.conv2.weight'].shape[0]
+    dim_fnet = state_dict['patchify.fnet.conv2.weight'].shape[0]
+    dim      = state_dict['patchify.fnet.conv1.weight'].shape[0]
+    network = eVONet(DEIO_CFG, dim_inet=dim_inet, dim_fnet=dim_fnet, dim=dim,
+                     patch_selector=DEIO_CFG.PATCH_SELECTOR)
+    network.load_state_dict(state_dict)
+    network.cuda().eval()
+    print(f'Network loaded (dim_inet={dim_inet}, dim_fnet={dim_fnet}, dim={dim}).')
+
     all_results = []
     for h5_path, dataset_name in h5_files:
         if args.skip_done and output_dir is not None:
@@ -810,7 +834,7 @@ def main():
         result = evaluate_sequence(
             h5_path      = h5_path,
             deio_cfg     = DEIO_CFG,
-            network      = args.network,
+            network      = network,
             stride       = args.stride,
             H            = args.height,
             W            = args.width,

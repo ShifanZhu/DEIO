@@ -36,9 +36,9 @@ Ti1c: [ 0.01120354, -0.99976045,  0.01880224,  0.07737189,
         0.0,         0.0,         0.0,          1.0]
 ENALBE_INV: True  # input is T_event_imu (IMU→cam); code inverts to get Tbc
 
-accel_noise_sigma: 2.0000e-3
-gyro_noise_sigma: 1.6968e-04
-accel_bias_sigma: 3.0000e-3
-gyro_bias_sigma: 1.9393e-05
+accel_noise_sigma: 1.265572e-3
+gyro_noise_sigma: 7.2947299e-04
+accel_bias_sigma: 5.6386017e-5
+gyro_bias_sigma: 6.996094831e-06
 
 CLASSIC_LOOP_CLOSURE: False

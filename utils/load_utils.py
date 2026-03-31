@@ -1696,16 +1696,8 @@ def cear_h5_iterator(h5_path, stride=1, H=240, W=320, skip_start_s=0.0):
 
     f = h5py.File(h5_path, 'r')
 
-    # ── Intrinsics & undistortion map ──────────────────────────────────────
-    K_orig  = f['meta/K_event'][:].astype(np.float32)
-    K_undist = f['meta/K_event_undist'][:].astype(np.float32)
-    D       = f['meta/D_event'][:].astype(np.float32)
-
-    term_criteria = (cv2.TERM_CRITERIA_MAX_ITER | cv2.TERM_CRITERIA_EPS, 100, 0.001)
-    coords = np.stack(np.meshgrid(np.arange(W), np.arange(H))).reshape((2, -1)).astype("float32")
-    points = cv2.undistortPointsIter(coords, K_orig, D, np.eye(3), K_undist, criteria=term_criteria)
-    rectify_map = points.reshape((H, W, 2))
-
+    # ── Intrinsics ─────────────────────────────────────────────────────────
+    K_undist   = f['meta/K_event_undist'][:].astype(np.float32)
     intrinsics = torch.as_tensor([K_undist[0,0], K_undist[1,1], K_undist[0,2], K_undist[1,2]])
 
     # ── Events ────────────────────────────────────────────────────────────
@@ -1726,11 +1718,10 @@ def cear_h5_iterator(h5_path, stride=1, H=240, W=320, skip_start_s=0.0):
         if i0 == i1:
             continue
 
-        xi = np.clip(evs_x[i0:i1].astype(np.int32), 0, W - 1)
-        yi = np.clip(evs_y[i0:i1].astype(np.int32), 0, H - 1)
-        rect = rectify_map[yi, xi]
+        xi = np.clip(evs_x[i0:i1].astype(np.float32), 0, W - 1)
+        yi = np.clip(evs_y[i0:i1].astype(np.float32), 0, H - 1)
 
-        voxel = to_voxel_grid(rect[..., 0], rect[..., 1],
+        voxel = to_voxel_grid(xi, yi,
                               evs_t[i0:i1].astype(np.float64),
                               evs_p[i0:i1],
                               H=H, W=W, nb_of_time_bins=5)

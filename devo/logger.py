@@ -7,12 +7,14 @@ SUM_FREQ = 100 # TODO invariant to gpu_nums
 
 # Short display names for known metric keys
 _METRIC_LABELS = {
-    "loss/train":            "loss",
-    "loss/pose_train":       "pose",
-    "loss/rotation_train":   "rot",
-    "loss/translation_train":"trans",
-    "loss/flow_train":       "flow",
-    "loss/scores_train":     "scores",
+    "loss/train":            "L_total",
+    "loss/pose_train":       "L_pose",
+    "loss/rotation_train":   "L_rot",
+    "loss/translation_train":"L_trans",
+    "loss/flow_train":       "L_flow",
+    "loss/scores_train":     "L_scorer",
+    "loss/cm_train":         "L_cm",
+    "loss/cm_weight":        "cm_w",
     "px1":                   "px<.25",
     "r1":                    "r<.001",
     "r2":                    "r<.01",
