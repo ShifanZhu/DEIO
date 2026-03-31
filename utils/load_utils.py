@@ -1821,6 +1821,62 @@ def cear_evs_iterator(scenedir, stride=1, timing=False, dT_ms=None, H=240, W=320
         yield voxel.cuda(), intr.cuda(), ts_us
 
 
+def vector_preprocessed_h5_iterator(h5_path, stride=1, H=480, W=640, skip_start_s=0.0,
+                                     n_bins=5):
+    """Iterator for VECTOR preprocessed H5 files.
+
+    These H5s store pre-computed time surface images instead of raw events:
+      events/time_images    (F, H, W)  float16  normalised event timestamps [0,1]
+      events/slices_index   (F+1,)     int64    (unused here, no raw events stored)
+      frames/depth_t_us     (F,)       int64    frame timestamps in µs
+      meta/K_event_undist   (3,3)               undistorted camera matrix
+
+    The time surface T(x,y) ∈ [0,1] records the normalised timestamp of the most
+    recent event at each pixel.  We convert it to an n_bins voxel grid by assigning
+    each active pixel to the bin that covers its timestamp, yielding a binary
+    approximation compatible with the network's expected input.
+    """
+    import h5py
+
+    f = h5py.File(h5_path, 'r')
+    print(f"Events from {h5_path}, Resolution: {H}×{W}")
+
+    K_undist   = f['meta/K_event_undist'][:].astype(np.float32)
+    intrinsics = torch.as_tensor([K_undist[0, 0], K_undist[1, 1],
+                                   K_undist[0, 2], K_undist[1, 2]])
+
+    time_images = f['events/time_images'][:]          # (F, H, W) float16
+    tss_us      = f['frames/depth_t_us'][:]           # (F,)      int64
+    f.close()
+
+    n_frames = len(tss_us)
+
+    data_list = []
+    for i in range(0, n_frames, stride):
+        ts_img = time_images[i].astype(np.float32)   # (H, W), values in [0, 1]
+
+        # Convert time surface → n_bins binary voxel grid
+        voxel = np.zeros((n_bins, H, W), dtype=np.float32)
+        active = ts_img > 0
+        bin_idx = np.clip((ts_img * n_bins).astype(np.int32), 0, n_bins - 1)
+        for b in range(n_bins):
+            voxel[b] = (active & (bin_idx == b)).astype(np.float32)
+
+        voxel = torch.from_numpy(voxel)
+        data_list.append((voxel, intrinsics.clone(), float(tss_us[i])))
+
+    if skip_start_s > 0.0 and data_list:
+        t0_us = data_list[0][2]
+        data_list = [(v, intr, t) for (v, intr, t) in data_list
+                     if t - t0_us >= skip_start_s * 1e6]
+        print(f"Skipped first {skip_start_s}s — {len(data_list)} voxels remaining")
+
+    print(f"Preloaded {len(data_list)} VECTOR-preprocessed voxels from {h5_path}")
+
+    for (voxel, intr, ts_us_out) in data_list:
+        yield voxel.pin_memory().cuda(non_blocking=True), intr.cuda(), ts_us_out
+
+
 def mvsec_h5_iterator(h5_path, stride=1, H=260, W=346, skip_start_s=0.0):
     """Iterator for MVSEC using the preprocessed H5 from deep_event_odometry pipeline.
 
@@ -1838,6 +1894,7 @@ def mvsec_h5_iterator(h5_path, stride=1, H=260, W=346, skip_start_s=0.0):
     import h5py
 
     f = h5py.File(h5_path, 'r')
+    print(f"Events from {h5_path}, Resolution: {H}×{W}")
 
     # Intrinsics (undistorted)
     K_undist    = f['meta/K_event_undist'][:].astype(np.float32)

@@ -84,7 +84,8 @@ def train(rank, args):
     if args.evs:
         db = dataset_factory(['tartan_evs'], datapath=args.datapath, n_frames=args.n_frames,
                              fgraph_pickle=args.fgraph_pickle, train_split=args.train_split,
-                             val_split=args.val_split, strict_split=False, sample=True, return_fname=True, scale=args.scale)
+                             val_split=args.val_split, strict_split=False, sample=True, return_fname=True, scale=args.scale,
+                             depth_norm_scale=args.depth_norm_scale if args.use_depth_init else None)
     elif args.e2vid:
         db = dataset_factory(['tartan_e2vid'], datapath=args.datapath, n_frames=args.n_frames,
                              fgraph_pickle=args.fgraph_pickle, train_split=args.train_split,
@@ -253,8 +254,9 @@ def train(rank, args):
                     t1 = P1.matrix()[...,:3,3] # predicted translation # TODO with detach()?
                     t2 = P2.matrix()[...,:3,3] # gt translation # TODO with detach()?
 
-                    s = kabsch_umeyama(t2[0], t1[0]).detach().clamp(max=10.0) # how to handle batch greater than 1?
-                    P1 = P1.scale(s.view(1, 1))
+                    if not args.use_depth_init:
+                        s = kabsch_umeyama(t2[0], t1[0]).detach().clamp(max=10.0) # how to handle batch greater than 1?
+                        P1 = P1.scale(s.view(1, 1))
 
                     dP = P1[:,ii].inv() * P1[:,jj] # predicted poses from frame i to j (G_ij)
                     dG = P2[:,ii].inv() * P2[:,jj] # gt poses from frame i to j (T_ij)
@@ -442,6 +444,9 @@ if __name__ == '__main__':
     parser.add_argument('--randaug', action='store_true', help='enable randAug (evs only)')
     parser.add_argument('--use_depth_init', action='store_true',
                         help='initialize patch depths from GT depth (+ 10%% noise) instead of random')
+    parser.add_argument('--depth_norm_scale', type=float, default=1.0,
+                        help='fixed depth normalization scale when --use_depth_init is set '
+                             '(replaces per-sample quantile normalization); default=1.0 gives metric units')
 
 
     parser.add_argument('--resnet', action='store_true', help='use the ResNet backbone')

@@ -1225,7 +1225,7 @@ class DBA:
 
 
 
-    def __call__(self, tstamp, image, intrinsics, scale=1.0):
+    def __call__(self, tstamp, image, intrinsics, scale=1.0, depth=None):
         """ track new voxel frame """
 
         if self.cfg.CLASSIC_LOOP_CLOSURE:#如果开启了经典的闭环检测（就是图像匹配）
@@ -1301,11 +1301,18 @@ class DBA:
         if image.shape[-1] == 346:
             image = image[..., 1:-1] # hack for MVSEC, FPV,...
 
-        # TODO patches with depth is available (val)
+        disps_sensor = None
+        if depth is not None:
+            depth_ds = depth[1::4, 1::4].clamp(min=0.01)  # stride-4 to match training (enet.py:681)
+            disps_raw = 1.0 / depth_ds
+            depth_norm_scale = getattr(self.cfg, 'DEPTH_NORM_SCALE', 1.0)
+            disps_sensor = (disps_raw / depth_norm_scale)[None, None]  # (1, 1, H/4, W/4)
+
         with autocast(enabled=self.cfg.MIXED_PRECISION):
             fmap, gmap, imap, patches, _, clr = \
                 self.network.patchify(image,
-                    patches_per_image=self.cfg.PATCHES_PER_FRAME, 
+                    patches_per_image=self.cfg.PATCHES_PER_FRAME,
+                    disps=disps_sensor,
                     return_color=True,
                     scorer_eval_mode=self.cfg.SCORER_EVAL_MODE,
                     scorer_eval_use_grid=self.cfg.SCORER_EVAL_USE_GRID)
@@ -1345,11 +1352,13 @@ class DBA:
                 tvec_qvec = self.poses[self.n-1]
                 self.pg.poses_[self.n] = tvec_qvec
 
-        # TODO better depth initialization
-        patches[:,:,2] = torch.rand_like(patches[:,:,2,0,0,None,None])
-        if self.is_initialized:
+        if depth is not None:
+            pass  # patches[:,:,2] already has sensor disparities from patchify
+        elif self.is_initialized:
             s = torch.median(self.pg.patches_[self.n-3:self.n,:,2])
             patches[:,:,2] = s
+        else:
+            patches[:,:,2] = torch.rand_like(patches[:,:,2,0,0,None,None])
 
         self.pg.patches_[self.n] = patches
 

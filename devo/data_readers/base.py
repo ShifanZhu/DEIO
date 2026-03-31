@@ -204,7 +204,8 @@ class RGBDDataset(data.Dataset):
 
 class EVSDDataset(data.Dataset):
     def __init__(self, name, datapath, n_frames=4, crop_size=[480,640], fmin=10.0, fmax=75.0, aug=True, sample=True,
-                 fgraph_pickle=None, train_split=None, val_split=None, strict_split=True, return_fname=False, scale=1.0):
+                 fgraph_pickle=None, train_split=None, val_split=None, strict_split=True, return_fname=False, scale=1.0,
+                 depth_norm_scale=None):
         """ Base class for Events + Depth dataset """
         self.aug = None
         self.root = datapath
@@ -214,6 +215,7 @@ class EVSDDataset(data.Dataset):
         self.aug = aug
         self.sample = sample
         self.scale = scale
+        self.depth_norm_scale = depth_norm_scale
 
         self.n_frames = n_frames
         self.fmin = fmin # exclude very easy examples
@@ -377,7 +379,10 @@ class EVSDDataset(data.Dataset):
                 self.aug(voxels, poses, disps, intrinsics)
 
         # normalize depth
-        s = .7 * torch.quantile(disps, .98)
+        if self.depth_norm_scale is not None:
+            s = torch.tensor(self.depth_norm_scale, dtype=torch.float32)
+        else:
+            s = (.7 * torch.quantile(disps, .98)).clamp(min=1e-3)
         disps = disps / s
         poses[...,:3] *= s
 

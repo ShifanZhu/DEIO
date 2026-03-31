@@ -52,7 +52,7 @@ from evo.tools.settings import SETTINGS
 SETTINGS['plot_backend'] = 'Agg'
 
 from devo.config import cfg as DEIO_CFG
-from utils.load_utils import cear_h5_iterator, mvsec_h5_iterator, vector_raw_iterator, m3ed_raw_iterator
+from utils.load_utils import cear_h5_iterator, mvsec_h5_iterator, vector_raw_iterator, vector_preprocessed_h5_iterator, m3ed_raw_iterator
 from utils.eval_utils import run_DEIO2
 
 
@@ -518,19 +518,23 @@ def evaluate_sequence(
                                        stride=stride, H=H, W=W)
     else:
         # Pick iterator based on dataset name inferred from path.
-        # MVSEC and VECtor preprocessed events are already undistorted (float16).
-        # CEAR events are raw distorted integer coords and need on-the-fly rectification.
-        PRE_UNDISTORTED = {'mvsec', 'vector'}
+        # MVSEC, VECtor preprocessed, and CEAR preprocessed H5s all store events
+        # as float16 undistorted pixel coords — no on-the-fly rectification needed.
+        # The cear_h5_iterator is a thin alias with the same logic as mvsec_h5_iterator.
         path_parts = [p.lower() for p in h5_path.parts]
-        if any(p in PRE_UNDISTORTED for p in path_parts):
-            matched = next(p for p in path_parts if p in PRE_UNDISTORTED)
-            print(f'Dataset type     : {matched.upper()} preprocessed H5  (iterator: mvsec/undistorted)')
+        if 'vector' in path_parts:
+            print(f'Dataset type     : VECTOR preprocessed H5  (iterator: vector_preprocessed)')
+            iterator = mvsec_h5_iterator(str(h5_path), stride=stride, H=H, W=W,
+                                                        skip_start_s=skip_start_s)
+        elif any(p in {'mvsec', 'cear'} for p in path_parts):
+            matched = next(p for p in path_parts if p in {'mvsec', 'cear'})
+            print(f'Dataset type     : {matched.upper()} preprocessed H5  (iterator: undistorted)')
             iterator = mvsec_h5_iterator(str(h5_path), stride=stride, H=H, W=W,
                                          skip_start_s=skip_start_s)
         else:
-            print(f'Dataset type     : CEAR (raw distorted coords, on-the-fly rectification)')
-            iterator = cear_h5_iterator(str(h5_path), stride=stride, H=H, W=W,
-                                        skip_start_s=skip_start_s)
+            print(f'Dataset type     : unknown preprocessed H5  (iterator: undistorted)')
+            iterator = mvsec_h5_iterator(str(h5_path), stride=stride, H=H, W=W,
+                                         skip_start_s=skip_start_s)
 
     # ── Run DEIO ──────────────────────────────────────────────────────────
     t0 = time.perf_counter()
@@ -779,6 +783,7 @@ def main():
     parser.add_argument('--block-dims',  type=str, default='64,128,256')
     parser.add_argument('--initial-dim', type=int, default=64)
     parser.add_argument('--pretrain',    type=str, default='resnet18')
+    parser.add_argument('--skip_start',  type=int, default=0)
     args = parser.parse_args()
 
     DEIO_CFG.merge_from_file(args.config)
