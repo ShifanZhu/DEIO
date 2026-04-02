@@ -835,7 +835,16 @@ def track_patches_step(
             iter_stats["time_corr_lookup"] += dt
         net = torch.nan_to_num(net.float(), nan=0.0, posinf=0.0, neginf=0.0)
         t_section = time.perf_counter()
-        net, (delta, weights, _) = network.update(net, template_ctx, corr, None, ii, jj, kk)
+        net, (delta, weights, _) = network.update(
+            net,
+            template_ctx,
+            corr,
+            None,
+            ii,
+            jj,
+            kk,
+            tracker_fast_path=True,
+        )
         dt = time.perf_counter() - t_section
         if step_stats is not None:
             step_stats["time_update"] += dt

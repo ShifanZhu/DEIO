@@ -173,8 +173,22 @@ class Update(nn.Module):
             GradientClip(),
             nn.Sigmoid())
 
+    @staticmethod
+    def _softagg_singletons(agg: SoftAgg, x: torch.Tensor) -> torch.Tensor:
+        """Exact SoftAgg result when every edge belongs to its own singleton group."""
+        return agg.h(agg.f(x))
 
-    def forward(self, net, inp, corr, flow, ii, jj, kk):
+    @staticmethod
+    def _softagg_single_group(agg: SoftAgg, x: torch.Tensor) -> torch.Tensor:
+        """Exact SoftAgg result when all edges share one group id."""
+        w = torch.softmax(agg.g(x), dim=1)
+        y = torch.sum(agg.f(x) * w, dim=1, keepdim=True)
+        y = agg.h(y)
+        if agg.expand:
+            return y.expand(-1, x.shape[1], -1)
+        return y
+
+    def forward(self, net, inp, corr, flow, ii, jj, kk, tracker_fast_path=False):
         """
         One recurrent update step — called STEPS times (default 18) per forward pass.
 
@@ -207,6 +221,10 @@ class Update(nn.Module):
             ii:   Source frame index for each edge (num_edges,)
             jj:   Target frame index for each edge (num_edges,)
             kk:   Patch index for each edge (num_edges,)
+            tracker_fast_path:
+                  Use the exact tracker-mode specialization for the degenerate
+                  single-frame graph used by `track_h5_patches.py`:
+                  `ii == 0`, `jj == 0`, `kk == arange(num_edges)`.
 
         Returns:
             net:     Updated hidden state (B, num_edges, dim) — passed to next iteration
@@ -224,39 +242,56 @@ class Update(nn.Module):
         net = net + inp + self.corr(corr)
         net = self.norm(net)  # (B, num_edges, 384)
 
-        # === STEP 2: NEIGHBOR MESSAGE PASSING ===
-        # fastba.neighbors(kk, jj) returns for each edge e = (patch_k → frame_j):
-        #   ix[e]: index of edge (patch_k → some_other_frame)  [same patch, diff target]
-        #   jx[e]: index of edge (some_other_patch → frame_j)  [diff patch, same target]
-        # Masks handle boundary edges (no neighbor) by zeroing their contribution.
-        ix, jx = fastba.neighbors(kk, jj)
-        mask_ix = (ix >= 0).float().reshape(1, -1, 1)
-        mask_jx = (jx >= 0).float().reshape(1, -1, 1)
+        if tracker_fast_path:
+            # Tracker mode has one edge per patch and only one target frame:
+            #   ii = 0, jj = 0, kk = arange(num_edges)
+            # In that case fastba.neighbors(...) returns all -1, so the c1/c2 inputs are
+            # identically zero. Because those MLPs contain bias terms, the exact tracker
+            # contribution is c1(0) + c2(0)
+            # repeated across all tracks. The two SoftAgg calls also collapse to cheaper
+            # exact forms:
+            #   agg_kk: every group is a singleton   -> h(f(net))
+            #   agg_ij: one group over all tracks    -> attention pool over dim=1
+            zero_state = net.new_zeros(net.shape[0], 1, net.shape[2])
+            net = net + self.c1(zero_state).expand(-1, net.shape[1], -1)
+            net = net + self.c2(zero_state).expand(-1, net.shape[1], -1)
+            net = net + self._softagg_singletons(self.agg_kk, net)
+            net = net + self._softagg_single_group(self.agg_ij, net)
 
-        # c1: cross-frame consistency for the same patch.
-        # "If patch k is confidently tracked to frame j' (strong correlation, high net magnitude),
-        #  propagate that into the state for (patch k → frame j)."
-        # Gradient teaches c1 which cross-frame information improves flow accuracy.
-        net = net + self.c1(mask_ix * net[:,ix])
+        else:
+            # === STEP 2: NEIGHBOR MESSAGE PASSING ===
+            # fastba.neighbors(kk, jj) returns for each edge e = (patch_k → frame_j):
+            #   ix[e]: index of edge (patch_k → some_other_frame)  [same patch, diff target]
+            #   jx[e]: index of edge (some_other_patch → frame_j)  [diff patch, same target]
+            # Masks handle boundary edges (no neighbor) by zeroing their contribution.
+            ix, jx = fastba.neighbors(kk, jj)
+            mask_ix = (ix >= 0).float().reshape(1, -1, 1)
+            mask_jx = (jx >= 0).float().reshape(1, -1, 1)
 
-        # c2: spatial consensus across patches for the same frame pair.
-        # "If patches 42,43,44 all tracked to frame j agree on motion (+3,0),
-        #  pull the state of ambiguous patch 45 toward that consensus."
-        # This is a learned spatial consistency check (analogous to RANSAC but differentiable).
-        net = net + self.c2(mask_jx * net[:,jx])
+            # c1: cross-frame consistency for the same patch.
+            # "If patch k is confidently tracked to frame j' (strong correlation, high net magnitude),
+            #  propagate that into the state for (patch k → frame j)."
+            # Gradient teaches c1 which cross-frame information improves flow accuracy.
+            net = net + self.c1(mask_ix * net[:,ix])
 
-        # === STEP 3: SOFT ATTENTION POOLING ===
-        # agg_kk: pools over all edges for the same patch (all target frames).
-        # The attention weight g(x) learns to emphasise target frames with reliable
-        # correlation; the pooled consensus is broadcast back to every edge of patch k.
-        # Suppresses ambiguous target frames without hard rejection.
-        net = net + self.agg_kk(net, kk)
+            # c2: spatial consensus across patches for the same frame pair.
+            # "If patches 42,43,44 all tracked to frame j agree on motion (+3,0),
+            #  pull the state of ambiguous patch 45 toward that consensus."
+            # This is a learned spatial consistency check (analogous to RANSAC but differentiable).
+            net = net + self.c2(mask_jx * net[:,jx])
 
-        # agg_ij: pools over all edges for the same frame pair (all patches).
-        # Learns which patches are most informative about the relative pose between
-        # frames i and j (high-gradient, distinctive patches dominate).
-        # Gives a global motion estimate shared across all patches in the frame pair.
-        net = net + self.agg_ij(net, ii*12345 + jj)
+            # === STEP 3: SOFT ATTENTION POOLING ===
+            # agg_kk: pools over all edges for the same patch (all target frames).
+            # The attention weight g(x) learns to emphasise target frames with reliable
+            # correlation; the pooled consensus is broadcast back to every edge of patch k.
+            # Suppresses ambiguous target frames without hard rejection.
+            net = net + self.agg_kk(net, kk)
+
+            # agg_ij: pools over all edges for the same frame pair (all patches).
+            # Learns which patches are most informative about the relative pose between
+            # frames i and j (high-gradient, distinctive patches dominate).
+            # Gives a global motion estimate shared across all patches in the frame pair.
+            net = net + self.agg_ij(net, ii*12345 + jj)
 
         # === STEP 4: GATED RECURRENT UPDATE ===
         # Two GatedResidual blocks selectively update the belief state:
