@@ -48,7 +48,7 @@ import os
 import re
 import tempfile
 import time
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from pathlib import Path
 
 import cv2
@@ -280,6 +280,41 @@ def load_tracking_network(args, runtime_cfg):
         f"(dim_inet={network.dim_inet}, dim_fnet={network.dim_fnet}, dim={network.dim})"
     )
     return network
+
+
+def add_timing(timings: dict[str, float], key: str, start_t: float) -> None:
+    """Accumulate elapsed wall time for one named section."""
+    timings[key] += time.perf_counter() - start_t
+
+
+def print_track_step_stats(frame_idx: int, stats: dict) -> None:
+    """Print one detailed per-frame breakdown for track_patches_step()."""
+    print(
+        f"track_patches_step frame {frame_idx}: "
+        f"tracks {stats['start_tracks']} -> {stats['end_tracks']}  "
+        f"iters={stats['iterations_run']}/{stats['iterations_requested']}  "
+        f"removed_invalid={stats['removed_invalid_total']}  "
+        f"removed_support={stats['removed_support_total']}"
+    )
+    for row in stats["per_iter"]:
+        print(
+            f"  iter {row['iter']:02d}: tracks {row['tracks_in']} -> {row['tracks_out']}  "
+            f"removed_invalid={row['removed_invalid']}  "
+            f"corr_ctor={1000.0 * row['time_corrblock_init']:.2f}ms  "
+            f"corr={1000.0 * row['time_corr_lookup']:.2f}ms  "
+            f"update={1000.0 * row['time_update']:.2f}ms  "
+            f"delta={1000.0 * row['time_apply_delta']:.2f}ms  "
+            f"boundary={1000.0 * row['time_boundary_filter']:.2f}ms"
+        )
+    print(
+        "  totals: "
+        f"corr_ctor={1000.0 * stats['time_corrblock_init']:.2f}ms  "
+        f"corr={1000.0 * stats['time_corr_lookup']:.2f}ms  "
+        f"update={1000.0 * stats['time_update']:.2f}ms  "
+        f"delta={1000.0 * stats['time_apply_delta']:.2f}ms  "
+        f"boundary={1000.0 * stats['time_boundary_filter']:.2f}ms  "
+        f"support={1000.0 * stats['time_support_filter']:.2f}ms"
+    )
 
 
 def normalize_event_voxel(image: torch.Tensor, norm: str) -> torch.Tensor:
@@ -718,7 +753,8 @@ def track_patches_step(
     min_event_support: float = 1.0,
     min_event_pixels: float = 1.0,
     net_state: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    collect_stats: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict | None]:
     """Track one set of patches into the next frame/bin without BA."""
     num_tracks = prev_centers.shape[1]
     feat_h, feat_w = fmap_tgt.shape[-2:]
@@ -727,12 +763,29 @@ def track_patches_step(
     template_ctx = torch.nan_to_num(template_ctx.float(), nan=0.0, posinf=0.0, neginf=0.0)
     centers = prev_centers.clone()
     survivor_idx = torch.arange(num_tracks, dtype=torch.long, device=prev_centers.device)
+    step_stats = None
+    if collect_stats:
+        step_stats = {
+            "start_tracks": int(num_tracks),
+            "end_tracks": int(num_tracks),
+            "iterations_requested": int(tracker_steps),
+            "iterations_run": 0,
+            "removed_invalid_total": 0,
+            "removed_support_total": 0,
+            "time_corrblock_init": 0.0,
+            "time_corr_lookup": 0.0,
+            "time_update": 0.0,
+            "time_apply_delta": 0.0,
+            "time_boundary_filter": 0.0,
+            "time_support_filter": 0.0,
+            "per_iter": [],
+        }
 
     if num_tracks == 0:
         empty_coords = prev_centers.new_zeros((1, 0, network.P, network.P, 2))
         empty_weights = prev_centers.new_zeros((1, 0, 2))
         empty_net = prev_centers.new_zeros((1, 0, network.dim_inet))
-        return centers, empty_coords, empty_weights, template_gmap, template_ctx, survivor_idx, empty_net
+        return centers, empty_coords, empty_weights, template_gmap, template_ctx, survivor_idx, empty_net, step_stats
 
     if net_state is None or net_state.shape[1] != num_tracks:
         net = torch.zeros(
@@ -746,25 +799,60 @@ def track_patches_step(
         net = net_state.clone().float()
     weights = torch.ones(1, num_tracks, 2, device=prev_centers.device, dtype=torch.float)
 
-    for _ in range(tracker_steps):
+    for iter_idx in range(tracker_steps):
         if centers.shape[1] == 0:
             break
         num_tracks = centers.shape[1]
+        iter_stats = None
+        if step_stats is not None:
+            iter_stats = {
+                "iter": int(iter_idx),
+                "tracks_in": int(num_tracks),
+                "tracks_out": int(num_tracks),
+                "removed_invalid": 0,
+                "time_corrblock_init": 0.0,
+                "time_corr_lookup": 0.0,
+                "time_update": 0.0,
+                "time_apply_delta": 0.0,
+                "time_boundary_filter": 0.0,
+            }
         ii = torch.zeros(num_tracks, dtype=torch.long, device=prev_centers.device)
         jj = torch.zeros(num_tracks, dtype=torch.long, device=prev_centers.device)
         kk = torch.arange(num_tracks, dtype=torch.long, device=prev_centers.device)
+        t_section = time.perf_counter()
         corr_fn = CorrBlock(fmap_tgt, template_gmap, radius=corr_radius, dropout=0.0, levels=[1, 4])
+        dt = time.perf_counter() - t_section
+        if step_stats is not None:
+            step_stats["time_corrblock_init"] += dt
+            iter_stats["time_corrblock_init"] += dt
+        t_section = time.perf_counter()
         coords = centers_to_patch_coords(centers, network.P)
         corr = corr_fn(kk, jj, coords.permute(0, 1, 4, 2, 3).contiguous())
         corr = torch.nan_to_num(corr.float(), nan=0.0, posinf=0.0, neginf=0.0)
+        dt = time.perf_counter() - t_section
+        if step_stats is not None:
+            step_stats["time_corr_lookup"] += dt
+            iter_stats["time_corr_lookup"] += dt
         net = torch.nan_to_num(net.float(), nan=0.0, posinf=0.0, neginf=0.0)
+        t_section = time.perf_counter()
         net, (delta, weights, _) = network.update(net, template_ctx, corr, None, ii, jj, kk)
+        dt = time.perf_counter() - t_section
+        if step_stats is not None:
+            step_stats["time_update"] += dt
+            iter_stats["time_update"] += dt
         net = torch.nan_to_num(net.float(), nan=0.0, posinf=0.0, neginf=0.0)
         delta = torch.nan_to_num(delta.float(), nan=0.0, posinf=0.0, neginf=0.0)
         weights = torch.nan_to_num(weights.float(), nan=0.0, posinf=0.0, neginf=0.0)
+        t_section = time.perf_counter()
         centers = centers + delta
+        dt = time.perf_counter() - t_section
+        if step_stats is not None:
+            step_stats["time_apply_delta"] += dt
+            iter_stats["time_apply_delta"] += dt
 
         valid = valid_track_mask(centers, feat_h, feat_w, network.P)[0]
+        removed_invalid = int((~valid).sum().item()) if valid.numel() > 0 else 0
+        t_section = time.perf_counter()
         if not valid.any():
             centers, template_gmap, template_ctx, net, weights, survivor_idx = filter_track_state(
                 centers,
@@ -775,6 +863,15 @@ def track_patches_step(
                 survivor_idx,
                 valid,
             )
+            dt = time.perf_counter() - t_section
+            if step_stats is not None:
+                step_stats["time_boundary_filter"] += dt
+                step_stats["removed_invalid_total"] += removed_invalid
+                step_stats["iterations_run"] += 1
+                iter_stats["time_boundary_filter"] += dt
+                iter_stats["removed_invalid"] = removed_invalid
+                iter_stats["tracks_out"] = int(centers.shape[1])
+                step_stats["per_iter"].append(iter_stats)
             break
 
         if (~valid).any():
@@ -787,8 +884,18 @@ def track_patches_step(
                 survivor_idx,
                 valid,
             )
+        dt = time.perf_counter() - t_section
+        if step_stats is not None:
+            step_stats["time_boundary_filter"] += dt
+            step_stats["removed_invalid_total"] += removed_invalid
+            step_stats["iterations_run"] += 1
+            iter_stats["time_boundary_filter"] += dt
+            iter_stats["removed_invalid"] = removed_invalid
+            iter_stats["tracks_out"] = int(centers.shape[1])
+            step_stats["per_iter"].append(iter_stats)
 
     if event_support_mass_map is not None and event_support_count_map is not None and centers.shape[1] > 0:
+        t_section = time.perf_counter()
         supported = supported_track_mask(
             centers,
             event_support_mass_map,
@@ -796,6 +903,7 @@ def track_patches_step(
             min_event_support,
             min_event_pixels,
         )
+        removed_support = int((~supported).sum().item()) if supported.numel() > 0 else 0
         if (~supported).any():
             centers, template_gmap, template_ctx, net, weights, survivor_idx = filter_track_state(
                 centers,
@@ -806,12 +914,18 @@ def track_patches_step(
                 survivor_idx,
                 supported,
             )
+        dt = time.perf_counter() - t_section
+        if step_stats is not None:
+            step_stats["time_support_filter"] += dt
+            step_stats["removed_support_total"] += removed_support
 
     if centers.shape[1] == 0:
         coords = prev_centers.new_zeros((1, 0, network.P, network.P, 2))
     else:
         coords = centers_to_patch_coords(centers, network.P)
-    return centers, coords, weights.float(), template_gmap, template_ctx, survivor_idx, net.float()
+    if step_stats is not None:
+        step_stats["end_tracks"] = int(centers.shape[1])
+    return centers, coords, weights.float(), template_gmap, template_ctx, survivor_idx, net.float(), step_stats
 
 
 def save_tracker_frame(
@@ -1000,6 +1114,13 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
 
     track_history_px: list[np.ndarray] = []
     frame_rows = []
+    timings = defaultdict(float)
+    track_step_internal_totals = defaultdict(float)
+    track_step_calls = 0
+    track_step_iterations_total = 0
+    track_step_removed_invalid_total = 0
+    track_step_removed_support_total = 0
+    collect_track_step_stats = args.timing or args.timing_track_step
 
     t_start = time.perf_counter()
     num_tracked_frames = 0
@@ -1010,7 +1131,9 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
             print(f"Frame {frame_idx}: {reason}")
             warned_norm_fallback = True
 
+        t_section = time.perf_counter()
         voxel_norm = normalize_event_voxel(voxel, effective_norm)
+        add_timing(timings, "normalize_voxel", t_section)
         if not torch.isfinite(voxel_norm).all():
             if effective_norm.lower() != "none":
                 print(
@@ -1018,7 +1141,9 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
                     "falling back to none for tracker mode"
                 )
                 effective_norm = "none"
+                t_section = time.perf_counter()
                 voxel_norm = normalize_event_voxel(voxel, effective_norm)
+                add_timing(timings, "normalize_voxel", t_section)
             if not torch.isfinite(voxel_norm).all():
                 print(f"Skipping frame {frame_idx}: normalized voxel is still non-finite")
                 continue
@@ -1026,11 +1151,17 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
         voxel_for_viz = voxel
         if voxel_for_viz.shape[-1] == 346:
             voxel_for_viz = voxel_for_viz[..., 1:-1]
+        t_section = time.perf_counter()
         fmap, imap, scores = extract_frame_features(network, voxel_norm, runtime_cfg.MIXED_PRECISION)
+        add_timing(timings, "extract_frame_features", t_section)
         if args.save_score_maps:
+            t_section = time.perf_counter()
             save_score_map_frame(score_dir, frame_idx, float(timestamp_us), scores[0, 0])
+            add_timing(timings, "save_score_maps", t_section)
         feat_h, feat_w = fmap.shape[-2:]
+        t_section = time.perf_counter()
         event_support_mass_map, event_support_count_map = build_event_support_maps(voxel, network.P)
+        add_timing(timings, "build_event_support_maps", t_section)
 
         should_reinitialize = (
             prev_centers is None
@@ -1040,6 +1171,7 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
         )
 
         if should_reinitialize:
+            t_section = time.perf_counter()
             try:
                 if args.tracker_selector == "native":
                     centers, score_vals = select_patch_centers_native(
@@ -1069,7 +1201,9 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
                 except RuntimeError:
                     print(f"Skipping frame {frame_idx}: {exc}")
                     continue
+            add_timing(timings, "initialize_select_patches", t_section)
 
+            t_section = time.perf_counter()
             support_valid = supported_track_mask(
                 centers,
                 event_support_mass_map,
@@ -1077,6 +1211,7 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
                 args.min_event_support,
                 args.min_event_pixels,
             )
+            add_timing(timings, "initialize_support_filter", t_section)
             if not support_valid.any():
                 print(
                     f"Skipping frame {frame_idx}: selected patches have "
@@ -1095,9 +1230,11 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
                 )
 
             prev_centers = centers.cuda()
+            t_section = time.perf_counter()
             template_gmap, template_ctx = extract_patch_features(
                 fmap, imap, prev_centers, network.P, network.dim_fnet, network.dim_inet
             )
+            add_timing(timings, "initialize_extract_patch_features", t_section)
             tracker_net = None
             scores_init_np = score_vals.detach().cpu().numpy().astype(np.float32)
             init_frame_idx = frame_idx
@@ -1108,6 +1245,7 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
             track_history_px = [centers_px]
 
             if args.save_raw:
+                t_section = time.perf_counter()
                 save_tracker_frame(
                     tracks_dir,
                     frame_idx,
@@ -1118,7 +1256,9 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
                     weights=None,
                     init_frame_idx=init_frame_idx,
                 )
+                add_timing(timings, "save_raw_tracks", t_section)
             if not args.no_render:
+                t_section = time.perf_counter()
                 viz_img, viz_offsets = voxel_bins_to_bgr_grid(voxel_for_viz)
                 render_tracker_frame(
                     viz_dir,
@@ -1129,6 +1269,7 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
                     track_history_px,
                     args.trail_length,
                 )
+                add_timing(timings, "render_tracker_viz", t_section)
 
             frame_rows.append((frame_idx, float(timestamp_us), prev_centers.shape[1]))
             num_tracked_frames += 1
@@ -1137,7 +1278,8 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
 
         source_centers = prev_centers.clone()
         old_num_tracks = prev_centers.shape[1]
-        prev_centers, coords_feat, weights, template_gmap, template_ctx, survivor_idx, tracker_net = track_patches_step(
+        t_section = time.perf_counter()
+        prev_centers, coords_feat, weights, template_gmap, template_ctx, survivor_idx, tracker_net, step_stats = track_patches_step(
             network,
             template_gmap,
             template_ctx,
@@ -1150,12 +1292,31 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
             min_event_support=args.min_event_support,
             min_event_pixels=args.min_event_pixels,
             net_state=tracker_net,
+            collect_stats=collect_track_step_stats,
         )
+        add_timing(timings, "track_patches_step", t_section)
+        if step_stats is not None:
+            track_step_calls += 1
+            track_step_iterations_total += int(step_stats["iterations_run"])
+            track_step_removed_invalid_total += int(step_stats["removed_invalid_total"])
+            track_step_removed_support_total += int(step_stats["removed_support_total"])
+            for key in (
+                "time_corrblock_init",
+                "time_corr_lookup",
+                "time_update",
+                "time_apply_delta",
+                "time_boundary_filter",
+                "time_support_filter",
+            ):
+                track_step_internal_totals[key] += float(step_stats[key])
+            if args.timing_track_step:
+                print_track_step_stats(frame_idx, step_stats)
 
         removed_support = old_num_tracks - survivor_idx.numel()
         removed_ransac = 0
         if prev_centers.shape[1] > 0:
             source_centers = source_centers[:, survivor_idx]
+            t_section = time.perf_counter()
             ransac_inliers = ransac_epipolar_inlier_mask(
                 source_centers,
                 prev_centers,
@@ -1165,6 +1326,7 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
                 min_points=args.ransac_min_points,
                 min_inliers=args.ransac_min_inliers,
             )
+            add_timing(timings, "ransac_epipolar_filter", t_section)
             if (~ransac_inliers).any():
                 removed_ransac = int((~ransac_inliers).sum().item())
                 prev_centers, template_gmap, template_ctx, tracker_net, weights, survivor_idx = filter_track_state(
@@ -1184,12 +1346,12 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
             init_points_px = init_points_px[survivor_idx_np]
             scores_init_np = scores_init_np[survivor_idx_np]
 
-        if removed_support > 0:
-            print(
-                f"Frame {frame_idx}: removed {removed_support} "
-                f"tracks that moved out of bounds or below {args.min_event_support:g} event support "
-                f"or {args.min_event_pixels:g} active event pixels"
-            )
+        # if removed_support > 0:
+        #     print(
+        #         f"Frame {frame_idx}: removed {removed_support} "
+        #         f"tracks that moved out of bounds or below {args.min_event_support:g} event support "
+        #         f"or {args.min_event_pixels:g} active event pixels"
+        #     )
         if removed_ransac > 0:
             print(
                 f"Frame {frame_idx}: RANSAC removed {removed_ransac} tracks inconsistent with "
@@ -1200,6 +1362,7 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
             centers_px = np.empty((0, 2), dtype=np.float32)
             track_history_px.append(centers_px)
             if args.save_raw:
+                t_section = time.perf_counter()
                 save_tracker_frame(
                     tracks_dir,
                     frame_idx,
@@ -1210,7 +1373,9 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
                     weights=weights,
                     init_frame_idx=init_frame_idx,
                 )
+                add_timing(timings, "save_raw_tracks", t_section)
             if not args.no_render:
+                t_section = time.perf_counter()
                 viz_img, viz_offsets = voxel_bins_to_bgr_grid(voxel_for_viz)
                 render_tracker_frame(
                     viz_dir,
@@ -1221,19 +1386,23 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
                     track_history_px,
                     args.trail_length,
                 )
+                add_timing(timings, "render_tracker_viz", t_section)
             frame_rows.append((frame_idx, float(timestamp_us), 0))
             num_tracked_frames += 1
             continue
 
         if args.refresh_template:
+            t_section = time.perf_counter()
             template_gmap, template_ctx = extract_patch_features(
                 fmap, imap, prev_centers, network.P, network.dim_fnet, network.dim_inet
             )
+            add_timing(timings, "refresh_template_features", t_section)
 
         centers_px = prev_centers[0].detach().cpu().numpy().astype(np.float32) * 4.0
         track_history_px.append(centers_px)
 
         if args.save_raw:
+            t_section = time.perf_counter()
             save_tracker_frame(
                 tracks_dir,
                 frame_idx,
@@ -1244,7 +1413,9 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
                 weights=weights,
                 init_frame_idx=init_frame_idx,
             )
+            add_timing(timings, "save_raw_tracks", t_section)
         if not args.no_render:
+            t_section = time.perf_counter()
             viz_img, viz_offsets = voxel_bins_to_bgr_grid(voxel_for_viz)
             render_tracker_frame(
                 viz_dir,
@@ -1255,6 +1426,7 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
                 track_history_px,
                 args.trail_length,
             )
+            add_timing(timings, "render_tracker_viz", t_section)
 
         frame_rows.append((frame_idx, float(timestamp_us), prev_centers.shape[1]))
         num_tracked_frames += 1
@@ -1280,8 +1452,43 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
     else:
         print(f"Saved tracker output for {seq_name}: {num_tracked_frames} frames -> {out_dir}")
 
-    if args.timing and avg_fps is not None:
-        print(f"Tracker throughput: {avg_fps:.1f} FPS")
+    if args.timing or args.timing_track_step:
+        if avg_fps is not None:
+            print(f"Tracker throughput: {avg_fps:.1f} FPS")
+        if args.timing:
+            timed_total = sum(timings.values())
+            if elapsed > timed_total:
+                timings["other_python_overhead"] += elapsed - timed_total
+            timing_rows = sorted(timings.items(), key=lambda kv: kv[1], reverse=True)
+            if timing_rows:
+                slowest_name, slowest_time = timing_rows[0]
+                print(
+                    f"Slowest tracker section: {slowest_name} "
+                    f"({slowest_time:.3f}s total, {100.0 * slowest_time / max(elapsed, 1e-9):.1f}% of wall time)"
+                )
+                print("Tracker timing breakdown:")
+                denom_frames = max(num_tracked_frames, 1)
+                for name, total_s in timing_rows:
+                    pct = 100.0 * total_s / max(elapsed, 1e-9)
+                    ms_per_frame = 1000.0 * total_s / denom_frames
+                    print(f"  {name:28s} total={total_s:7.3f}s  pct={pct:5.1f}%  ms/frame={ms_per_frame:7.2f}")
+        if track_step_calls > 0:
+            print(
+                f"track_patches_step aggregate: calls={track_step_calls}  "
+                f"avg_iters/call={track_step_iterations_total / track_step_calls:.2f}  "
+                f"removed_invalid={track_step_removed_invalid_total}  "
+                f"removed_support={track_step_removed_support_total}"
+            )
+            nested_rows = sorted(track_step_internal_totals.items(), key=lambda kv: kv[1], reverse=True)
+            if nested_rows:
+                print("track_patches_step internals:")
+                for name, total_s in nested_rows:
+                    ms_per_call = 1000.0 * total_s / track_step_calls
+                    ms_per_iter = 1000.0 * total_s / max(track_step_iterations_total, 1)
+                    print(
+                        f"  {name:24s} total={total_s:7.3f}s  "
+                        f"ms/call={ms_per_call:7.2f}  ms/iter={ms_per_iter:7.2f}"
+                    )
 
     return {
         "seq_name": seq_name,
@@ -1483,6 +1690,11 @@ def main():
         help="Enable assertions in legacy viz_flow_inference",
     )
     parser.add_argument("--timing", action="store_true", help="Print runtime timing")
+    parser.add_argument(
+        "--timing-track-step",
+        action="store_true",
+        help="Print per-frame internal timing for track_patches_step(); combine with --timing for the full breakdown",
+    )
     parser.add_argument("--dim_inet", type=int, default=384)
     parser.add_argument("--dim_fnet", type=int, default=128)
     parser.add_argument("--dim", type=int, default=32)

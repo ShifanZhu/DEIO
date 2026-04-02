@@ -96,15 +96,6 @@ def _save_trajectory_plot(path, positions_xyz):
     plt.close(fig)
 
 
-def _valid_pose7_mask(traj_7):
-    if len(traj_7) == 0:
-        return np.zeros((0,), dtype=bool)
-    traj_7 = np.asarray(traj_7, dtype=np.float64)
-    finite = np.isfinite(traj_7).all(axis=1)
-    qnorm = np.linalg.norm(traj_7[:, 3:7], axis=1)
-    return finite & (qnorm > 1e-8)
-
-
 def _load_imu_h5(h5_path):
     with h5py.File(h5_path, "r") as f:
         imu_t = f["imu/t_us"][:].astype(np.float64)
@@ -196,15 +187,6 @@ def _save_infer_h5_matched_trajectory(h5_path, devo_cfg, weights_path, img_heigh
     if len(traj_est) == 0:
         raise RuntimeError("DEIO2 export produced no poses")
 
-    mask = _valid_pose7_mask(traj_est)
-    dropped = int((~mask).sum())
-    if dropped > 0:
-        print(f"[srv] infer_h5 export: dropping {dropped} invalid pose(s) before save.")
-    traj_est = traj_est[mask]
-    tstamps_us = np.asarray(tstamps_us, dtype=np.int64)[mask]
-    if len(traj_est) == 0:
-        raise RuntimeError("All DEIO2 export poses were invalid (non-finite or zero-quaternion)")
-
     gt_tss_us, gt_poses = _load_gt_h5(h5_path)
     if gt_tss_us is not None and gt_poses is not None:
         traj_est, tstamps_us = _anchor_like_infer_h5(traj_est, tstamps_us, gt_tss_us, gt_poses)
@@ -244,7 +226,6 @@ class TrajectoryRecorder:
         # DeltaPose_t stores T_wc(t1) * T_wc(t0)^-1, so accumulate in T_wc.
         if status == STATUS_VALID and delta_np is not None:
             self._current_T_wc = _pose7_to_matrix(delta_np) @ self._current_T_wc
-            #self._current_T_wc = self._current_T_wc @ _pose7_to_matrix(delta_np)
 
         if not self.timestamps_us or self.timestamps_us[-1] != t1_us:
             self.timestamps_us.append(t1_us)
@@ -254,9 +235,8 @@ class TrajectoryRecorder:
         if not self.timestamps_us:
             return np.empty((0, 7), dtype=np.float64), np.empty((0,), dtype=np.int64)
 
-        # Keep the same convention used by online delta composition and infer_h5
-        # exports (world-to-camera trajectory).
-        traj_7 = np.stack([_matrix_to_pose7(T_wc) for T_wc in self._poses_wc], axis=0)
+        poses_cw = [np.linalg.inv(T_wc) for T_wc in self._poses_wc]
+        traj_7 = np.stack([_matrix_to_pose7(T_cw) for T_cw in poses_cw], axis=0)
         tss_us = np.asarray(self.timestamps_us, dtype=np.int64)
         return traj_7, tss_us
 
@@ -297,12 +277,6 @@ def main():
                     help="Output path for the accumulated trajectory in TUM format")
     ap.add_argument("--plot_out",    default="",
                     help="Output path for the trajectory PNG plot")
-    ap.add_argument(
-        "--export_strategy",
-        choices=["online", "infer_h5"],
-        default="online",
-        help="Trajectory export source: online LCM accumulation (default) or infer_h5-style rerun",
-    )
     args = ap.parse_args()
 
     devo_cfg.merge_from_file(args.devo_config)
@@ -358,12 +332,12 @@ def main():
     try:
         while True:
             lc.handle()
-    except (KeyboardInterrupt, OSError):
+    except KeyboardInterrupt:
         print("\n[srv] Stopped.")
     finally:
         try:
             exported = False
-            if recorder.num_windows > 0 and args.export_strategy == "infer_h5":
+            if recorder.num_windows > 0:
                 try:
                     _save_infer_h5_matched_trajectory(
                         args.h5,

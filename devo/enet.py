@@ -443,6 +443,43 @@ class Patchifier(nn.Module):
         lam_min = lam_min.clamp(min=0).view(b, n, lam_min.shape[-2], lam_min.shape[-1])
         return lam_min
 
+    def compute_guided_scores(self, images, corner_guidance=None):
+        """Return raw scorer map, optional corner map, and guided scorer map.
+
+        This is a debug/helper entrypoint for comparing how `corner_guidance`
+        changes the learned scorer output without running the full tracker.
+        It mirrors the guidance logic used in the scorer branch of `forward()`.
+        """
+        if self.patch_selector != SelectionMethod.SCORER:
+            raise RuntimeError("compute_guided_scores() is only valid for scorer-based patch selection")
+        if not hasattr(self, 'scorer'):
+            raise RuntimeError("Patchifier has no scorer network")
+
+        mode = (self.corner_guidance if corner_guidance is None else corner_guidance).lower()
+
+        scores = torch.sigmoid(self.scorer(images))
+        corner_map = None
+
+        if mode == 'harris':
+            corner_map = self.__harris_response(images)
+        elif mode == 'shitomasi':
+            corner_map = self.__shitomasi_response(images)
+        elif mode != 'none':
+            raise ValueError(f"Unsupported corner_guidance '{mode}'")
+
+        if corner_map is not None:
+            corner_map = corner_map / (corner_map.amax(dim=(-2, -1), keepdim=True) + 1e-6)
+            if corner_map.shape != scores.shape:
+                corner_map = F.interpolate(
+                    corner_map.view(-1, 1, *corner_map.shape[-2:]),
+                    size=scores.shape[-2:], mode='bilinear', align_corners=False
+                ).view(scores.shape)
+            guided_scores = scores * corner_map
+        else:
+            guided_scores = scores
+
+        return scores, corner_map, guided_scores
+
     def forward(self, images, patches_per_image=80, disps=None, return_color=False, scorer_eval_mode="multi", scorer_eval_use_grid=True):
         """
         Extract and select event patches from voxel grids

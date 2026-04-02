@@ -73,7 +73,8 @@ class PatchTracker(nn.Module):
         self.randaug = randaug
 
     @autocast(enabled=False)
-    def forward(self, images, poses, disps, intrinsics, STEPS=12, patches_per_image=80):
+    def forward(self, images, poses, disps, intrinsics, STEPS=12, patches_per_image=80,
+                scorer_eval_mode="multi", scorer_eval_use_grid=True):
         """
         Forward pass: RAFT-style iterative patch tracking.
 
@@ -84,6 +85,8 @@ class PatchTracker(nn.Module):
             intrinsics: Camera K      (B, N_frames, 4)  [fx,fy,cx,cy] at full res
             STEPS:      Update iterations (default 12)
             patches_per_image: Patches selected per frame (default 80)
+            scorer_eval_mode: Patch selector used at eval time for scorer mode
+            scorer_eval_use_grid: Whether scorer eval selection uses the grid path
 
         Returns:
             traj: list of STEPS tuples, one per iteration:
@@ -121,7 +124,11 @@ class PatchTracker(nn.Module):
             disps = disps[:, :, 1::4, 1::4].float()
 
         # ── Step 2: extract patches and features ────────────────────────────
-        result = self.patchify(images, patches_per_image=patches_per_image, disps=disps)
+        result = self.patchify(images,
+                               patches_per_image=patches_per_image,
+                               disps=disps,
+                               scorer_eval_mode=scorer_eval_mode,
+                               scorer_eval_use_grid=scorer_eval_use_grid)
         if len(result) == 6:
             fmap, gmap, imap, patches, ix, scores = result
         else:
