@@ -33,7 +33,7 @@ class TartanAir(RGBDDataset):
         scenes = [glob.glob(osp.join(s, '*/*/*/*')) for s in scenes]
         scenes = functools.reduce(operator.concat, scenes)
         for scene in tqdm(sorted(scenes)):
-            if not scene_in_split(scene, self.train_split):
+            if not scene_in_split(scene, self.scene_build_split):
                 continue
             
             images = sorted(glob.glob(osp.join(scene, 'imgs/*.png')))
@@ -94,7 +94,7 @@ class TartanAirE2VID(RGBDDataset):
         scenes = [glob.glob(osp.join(s, '*/*/*/*')) for s in scenes]
         scenes = functools.reduce(operator.concat, scenes)
         for scene in tqdm(sorted(scenes)):
-            if not scene_in_split(scene, self.train_split):
+            if not scene_in_split(scene, self.scene_build_split):
                 continue
 
             images = sorted(glob.glob(osp.join(scene, 'e2calib/*.png')))
@@ -164,7 +164,7 @@ class TartanAirEVS(EVSDDataset):
                 print(f"Skipping {scene}. Not fully converted")
                 continue
 
-            if not scene_in_split(scene, self.train_split):
+            if not scene_in_split(scene, self.scene_build_split):
                 continue
 
             voxels = sorted(glob.glob(osp.join(scene, 'h5/*.h5')))
@@ -189,7 +189,7 @@ class TartanAirEVS(EVSDDataset):
         for evs_dir in tqdm(sorted(three_level_evs)):
             seq_dir = osp.dirname(evs_dir)
 
-            if not scene_in_split(seq_dir, self.train_split):
+            if not scene_in_split(seq_dir, self.scene_build_split):
                 continue
 
             voxels = sorted(glob.glob(osp.join(evs_dir, 'h5/*.h5')))
@@ -220,7 +220,7 @@ class TartanAirEVS(EVSDDataset):
         for evs_dir in tqdm(sorted(flat_evs)):
             seq_dir = osp.dirname(evs_dir)
 
-            if not scene_in_split(seq_dir, self.train_split):
+            if not scene_in_split(seq_dir, self.scene_build_split):
                 continue
 
             voxels = sorted(glob.glob(osp.join(evs_dir, 'h5/*.h5')))

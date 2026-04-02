@@ -15,6 +15,8 @@ class SelectionMethod(str, enum.Enum):
     RANDOM = "random"
     GRADIENT = "gradient"
     SCORER = "scorer"
+    HARRIS = "harris"
+    SHITOMASI = "shitomasi"
 
 class Scorer(nn.Module):
     def __init__(self, bins=5) -> None:

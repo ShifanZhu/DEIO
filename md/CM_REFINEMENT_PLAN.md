@@ -10,7 +10,32 @@ The fix: add a direct Contrast Maximization (CM) refinement stage **after** the 
 
 ## Frame and Time Window
 
-TartanAir runs at **10 FPS → each voxel covers ~100ms** of events. The 5 C_bins subdivide that 100ms into 5 equal 20ms slices. Frames `i` and `j` are indices into the N_frames sequence dimension (e.g., frame 3 and frame 5), **not** into C_bins. C_bins is the temporal structure *within* one frame's time window.
+TartanAir runs at **10 FPS → each voxel covers ~100ms** of events. The 5 bins encode the temporal structure *within* one frame's time window. Frames `i` and `j` are indices into the N_frames sequence dimension (e.g., frame 3 and frame 5), **not** into bins.
+
+### Voxel bin timing (verified from `to_voxel_grid` code)
+
+Timestamps are normalised to `[0, N-1] = [0, 4]` via:
+```
+t_norm = (t - t_start) * (N_bins - 1) / duration
+```
+This means 1 normalised unit = `100ms / 4 = 25ms`.
+
+**Bin centres** (where weight = 1.0 for an event landing exactly here):
+| Bin | Centre (ms) |
+|-----|-------------|
+| 0   | 0           |
+| 1   | 25          |
+| 2   | 50          |
+| 3   | 75          |
+| 4   | 100         |
+
+**Bin support** (real-time range that contributes non-zero weight via bilinear interpolation):
+- Bins 1, 2, 3: ±25ms around centre → **50ms wide**
+- Bins 0 and 4: clipped at window boundary → **25ms wide** (half support)
+
+**Consequence:** bins 0 and 4 collect only ~13% of a uniform event stream each, while bins 1–3 collect ~25% each. The first and last bins are underrepresented.
+
+The "20ms per bin" figure (100ms / 5) is the intuitive equal-division view but does not match the `[0, N-1]` normalisation in the code. The correct bin-centre spacing is **25ms**.
 
 ---
 

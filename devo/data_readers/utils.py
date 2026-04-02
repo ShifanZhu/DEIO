@@ -53,6 +53,34 @@ def load_splitfile(splitfile):
     assert len(split) > 0
     return split
 
+def merge_splits(train, val):
+    merged = []
+    seen = set()
+    for split in (train, val):
+        if split is None:
+            continue
+        for seq in split:
+            if seq not in seen:
+                merged.append(seq)
+                seen.add(seq)
+    return merged
+
+def resolve_split_mode(train, val, split_mode):
+    split_mode = split_mode.lower()
+    if split_mode == 'train':
+        return train
+    if split_mode == 'val':
+        return val
+    if split_mode == 'all':
+        return merge_splits(train, val)
+    raise ValueError(f"Unknown split_mode '{split_mode}'")
+
+def filter_scene_info_by_split(scene_info, split):
+    return {
+        scene: info
+        for scene, info in scene_info.items()
+        if scene_in_split(scene, split, verbose=False)
+    }
 
 def seqs_in_scene_info(split, scene_info):
     splits_in_sinfo = True

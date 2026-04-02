@@ -382,6 +382,35 @@ def voxel_bins_to_bgr_grid(voxel: torch.Tensor, max_cols: int = 3, pad: int = 6)
     return canvas, offsets
 
 
+def score_map_to_bgr(score_map: np.ndarray, upscale: int = 4) -> np.ndarray:
+    """Render a non-negative scorer map as a viewable heatmap."""
+    score_map = np.asarray(score_map, dtype=np.float32)
+    if score_map.ndim != 2:
+        raise ValueError(f"Expected 2D score map, got shape {score_map.shape}")
+
+    finite = np.isfinite(score_map)
+    if not finite.any():
+        norm_u8 = np.zeros(score_map.shape, dtype=np.uint8)
+    else:
+        safe = np.where(finite, score_map, 0.0)
+        lo = float(safe[finite].min())
+        hi = float(safe[finite].max())
+        if hi - lo <= 1e-8:
+            norm_u8 = np.zeros(score_map.shape, dtype=np.uint8)
+        else:
+            norm = np.clip((safe - lo) / (hi - lo), 0.0, 1.0)
+            norm_u8 = np.round(255.0 * norm).astype(np.uint8)
+
+    heatmap = cv2.applyColorMap(norm_u8, cv2.COLORMAP_TURBO)
+    if upscale > 1:
+        heatmap = cv2.resize(
+            heatmap,
+            (score_map.shape[1] * upscale, score_map.shape[0] * upscale),
+            interpolation=cv2.INTER_NEAREST,
+        )
+    return heatmap
+
+
 def extract_frame_features(network, images: torch.Tensor, mixed_precision: bool):
     """Run scorer, fnet, and inet on a single frame/bin."""
     with torch.amp.autocast("cuda", enabled=mixed_precision):
@@ -821,6 +850,23 @@ def save_tracker_frame(
     )
 
 
+def save_score_map_frame(
+    score_dir: Path,
+    frame_idx: int,
+    timestamp_us: float,
+    score_map: torch.Tensor,
+) -> None:
+    """Dump one scorer map as raw NPZ plus a quick-look PNG."""
+    score_np = torch.nan_to_num(score_map.detach().float(), nan=0.0, posinf=0.0, neginf=0.0).cpu().numpy().astype(np.float32)
+    np.savez_compressed(
+        score_dir / f"t{frame_idx:05d}.npz",
+        frame_idx=np.int32(frame_idx),
+        timestamp_us=np.float64(timestamp_us),
+        score_feature=score_np,
+    )
+    cv2.imwrite(str(score_dir / f"t{frame_idx:05d}.png"), score_map_to_bgr(score_np))
+
+
 def save_summary_csv(csv_path: Path, rows: list[tuple], headers: list[str]) -> None:
     """Write a simple CSV summary without NumPy binary output."""
     with csv_path.open("w", encoding="utf-8") as f:
@@ -834,6 +880,7 @@ def save_tracker_meta_json(meta_path: Path, args, init_frame_idx: int | None, sc
     meta = {
         "init_frame_idx": -1 if init_frame_idx is None else int(init_frame_idx),
         "tracker_patches": int(args.tracker_patches),
+        "save_score_maps": bool(args.save_score_maps),
         "min_event_support": float(args.min_event_support),
         "min_event_pixels": float(args.min_event_pixels),
         "ransac_reproj_thresh": float(args.ransac_reproj_thresh),
@@ -927,10 +974,13 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
 
     tracks_dir = out_dir / "tracks"
     viz_dir = out_dir / "flow_viz"
+    score_dir = out_dir / "score_maps"
     if args.save_raw:
         tracks_dir.mkdir(parents=True, exist_ok=True)
     if not args.no_render:
         viz_dir.mkdir(parents=True, exist_ok=True)
+    if args.save_score_maps:
+        score_dir.mkdir(parents=True, exist_ok=True)
 
     print(
         f"\n=== Tracking {seq_name} ({dataset_type}) with backend=tracker "
@@ -977,6 +1027,8 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
         if voxel_for_viz.shape[-1] == 346:
             voxel_for_viz = voxel_for_viz[..., 1:-1]
         fmap, imap, scores = extract_frame_features(network, voxel_norm, runtime_cfg.MIXED_PRECISION)
+        if args.save_score_maps:
+            save_score_map_frame(score_dir, frame_idx, float(timestamp_us), scores[0, 0])
         feat_h, feat_w = fmap.shape[-2:]
         event_support_mass_map, event_support_count_map = build_event_support_maps(voxel, network.P)
 
@@ -1416,6 +1468,11 @@ def main():
         help="Save raw per-frame track arrays under tracks/ in addition to PNG visualization",
     )
     parser.add_argument(
+        "--save-score-maps",
+        action="store_true",
+        help="Tracker backend only: save one scorer heatmap NPZ+PNG per processed frame under score_maps/",
+    )
+    parser.add_argument(
         "--no-render",
         action="store_true",
         help="Skip PNG rendering and only run tracking / raw export",
@@ -1530,6 +1587,8 @@ def main():
     tracker_network = None
     if args.backend == "tracker":
         tracker_network = load_tracking_network(args, runtime_cfg)
+    elif args.save_score_maps:
+        print("Warning: --save-score-maps is currently supported only for --backend tracker; ignoring it")
 
     out_root = Path(args.output_dir).resolve()
     results = []

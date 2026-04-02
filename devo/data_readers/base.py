@@ -15,14 +15,23 @@ import h5py
 
 from .augmentation import RGBDAugmentor, EVSDAugmentor
 from .rgbd_utils import *
-from .utils import seqs_in_scene_info, save_scene_info, load_splitfile, check_train_val_split
+from .utils import (
+    check_train_val_split,
+    filter_scene_info_by_split,
+    load_splitfile,
+    merge_splits,
+    resolve_split_mode,
+    save_scene_info,
+    seqs_in_scene_info,
+)
 from utils.load_utils import voxel_read
 from utils.transform_utils import transform_rescale
 
 
 class RGBDDataset(data.Dataset):
     def __init__(self, name, datapath, n_frames=4, crop_size=[480,640], fmin=10.0, fmax=75.0, aug=True, sample=True,
-                 fgraph_pickle=None, train_split=None, val_split=None, strict_split=True, return_fname=False, scale=1.0):
+                 fgraph_pickle=None, train_split=None, val_split=None, strict_split=True, return_fname=False, scale=1.0,
+                 split_mode='train'):
         """ Base class for RGBD dataset """
         self.aug = None
         self.root = datapath
@@ -38,8 +47,11 @@ class RGBDDataset(data.Dataset):
         self.fmax = fmax # exclude very hard examples
 
         self.train_split = load_splitfile(train_split)
-        val_split = load_splitfile(val_split) # do not need val split later on
-        check_train_val_split(self.train_split, val_split, strict=strict_split)
+        self.val_split = load_splitfile(val_split)
+        self.split_mode = split_mode
+        check_train_val_split(self.train_split, self.val_split, strict=strict_split)
+        self.scene_build_split = merge_splits(self.train_split, self.val_split)
+        self.scene_active_split = resolve_split_mode(self.train_split, self.val_split, split_mode)
 
         if self.aug:
             if self.scale != 1.0:
@@ -53,12 +65,14 @@ class RGBDDataset(data.Dataset):
         else:
             data = pickle.load(open(fgraph_pickle, 'rb'))
             scene_info = data[0] if isinstance(data, tuple) else data
-            if not seqs_in_scene_info(self.train_split, scene_info):
+            if not seqs_in_scene_info(self.scene_build_split, scene_info):
                 print(f"Loaded scene_info {fgraph_pickle} does NOT contain all requested scenes. Rebuilding dataset...")
                 scene_info = self._build_dataset()
                 save_scene_info(scene_info, name)
 
-        self.scene_info = scene_info
+        self.scene_info = filter_scene_info_by_split(scene_info, self.scene_active_split)
+        if len(self.scene_info) == 0:
+            raise RuntimeError(f"No scenes found for split_mode='{self.split_mode}' in dataset '{self.name}'")
         self._build_dataset_index()
                 
     def _build_dataset_index(self):
@@ -205,7 +219,7 @@ class RGBDDataset(data.Dataset):
 class EVSDDataset(data.Dataset):
     def __init__(self, name, datapath, n_frames=4, crop_size=[480,640], fmin=10.0, fmax=75.0, aug=True, sample=True,
                  fgraph_pickle=None, train_split=None, val_split=None, strict_split=True, return_fname=False, scale=1.0,
-                 depth_norm_scale=None):
+                 depth_norm_scale=None, split_mode='train'):
         """ Base class for Events + Depth dataset """
         self.aug = None
         self.root = datapath
@@ -222,8 +236,11 @@ class EVSDDataset(data.Dataset):
         self.fmax = fmax # exclude very hard examples
 
         self.train_split = load_splitfile(train_split)
-        val_split = load_splitfile(val_split) # do not need val split later on
-        check_train_val_split(self.train_split, val_split, strict=strict_split)
+        self.val_split = load_splitfile(val_split)
+        self.split_mode = split_mode
+        check_train_val_split(self.train_split, self.val_split, strict=strict_split)
+        self.scene_build_split = merge_splits(self.train_split, self.val_split)
+        self.scene_active_split = resolve_split_mode(self.train_split, self.val_split, split_mode)
 
         if self.aug:
             if self.scale != 1.0:
@@ -240,7 +257,7 @@ class EVSDDataset(data.Dataset):
             # check format: EVSDDataset needs 'voxels' key
             sample = next(iter(scene_info.values())) if scene_info else {}
             wrong_format = scene_info and 'voxels' not in sample
-            if wrong_format or not seqs_in_scene_info(self.train_split, scene_info):
+            if wrong_format or not seqs_in_scene_info(self.scene_build_split, scene_info):
                 if wrong_format:
                     print(f"Loaded scene_info {fgraph_pickle} has incompatible format. Rebuilding dataset...")
                 else:
@@ -248,7 +265,9 @@ class EVSDDataset(data.Dataset):
                 scene_info = self._build_dataset()
                 save_scene_info(scene_info, name)
 
-        self.scene_info = scene_info
+        self.scene_info = filter_scene_info_by_split(scene_info, self.scene_active_split)
+        if len(self.scene_info) == 0:
+            raise RuntimeError(f"No scenes found for split_mode='{self.split_mode}' in dataset '{self.name}'")
         self._build_dataset_index()
 
     def _build_dataset_index(self):

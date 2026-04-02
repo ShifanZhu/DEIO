@@ -299,12 +299,13 @@ class Patchifier(nn.Module):
         dim: Initial feature dimension in encoder (default: 32)
         patch_selector: Method for selecting patches
     """
-    def __init__(self, args, patch_size=3, dim_inet=DIM, dim_fnet=128, dim=32, patch_selector=SelectionMethod.SCORER):
+    def __init__(self, args, patch_size=3, dim_inet=DIM, dim_fnet=128, dim=32, patch_selector=SelectionMethod.SCORER, corner_guidance='none'):
         super(Patchifier, self).__init__()
         self.patch_size = patch_size
         self.dim_inet = dim_inet  # Dimension for context features (update operator)
         self.dim_fnet = dim_fnet  # Dimension for matching features (correlation)
         self.patch_selector = patch_selector.lower()
+        self.corner_guidance = corner_guidance.lower()  # 'none' | 'harris' | 'shitomasi'
 
         # Feature extractors for event voxel grids
         # Two separate encoders extract different feature representations
@@ -343,6 +344,104 @@ class Patchifier(nn.Module):
         g = torch.sqrt(dx**2 + dy**2)
         g = F.avg_pool2d(g, 4, 4)  # Downsample to match feature map resolution
         return g
+
+    def __harris_response(self, images, k=0.04, window=3):
+        """
+        Compute Harris corner response from event voxel grids.
+
+        Corners have gradient energy in TWO independent directions (both
+        eigenvalues of the structure tensor are large), whereas edges only
+        have gradient energy in ONE direction (aperture problem).
+
+        Harris response:  R = det(M) - k * trace(M)^2
+          R >> 0  →  corner   (keep)
+          R ≈  0  →  flat     (discard)
+          R <  0  →  edge     (discard via clamp)
+
+        where M = structure tensor averaged over a local window:
+            M = [[sum(Ix²), sum(IxIy)],
+                 [sum(IxIy), sum(Iy²)]]
+
+        Args:
+            images: Event voxel grids (B, N, bins, H, W)
+            k:      Harris sensitivity constant (default 0.04)
+            window: Averaging window size for structure tensor (default 3)
+
+        Returns:
+            R: Corner score map (B, N, H/4, W/4), non-negative
+        """
+        b, n, bins, h, w = images.shape
+
+        # Sum across temporal bins → (B*N, 1, H, W) intensity-like image
+        img = images.abs().sum(dim=2).view(b * n, 1, h, w)
+
+        # Sobel kernels for spatial gradients
+        sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+                                dtype=img.dtype, device=img.device).view(1, 1, 3, 3) / 8.0
+        sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+                                dtype=img.dtype, device=img.device).view(1, 1, 3, 3) / 8.0
+
+        Ix = F.conv2d(img, sobel_x, padding=1)   # (B*N, 1, H, W)
+        Iy = F.conv2d(img, sobel_y, padding=1)   # (B*N, 1, H, W)
+
+        # Structure tensor components, averaged over local window
+        avg = torch.ones(1, 1, window, window, dtype=img.dtype, device=img.device) / (window * window)
+        Ixx = F.conv2d(Ix * Ix, avg, padding=window // 2)
+        Iyy = F.conv2d(Iy * Iy, avg, padding=window // 2)
+        Ixy = F.conv2d(Ix * Iy, avg, padding=window // 2)
+
+        # Harris corner response
+        det   = Ixx * Iyy - Ixy * Ixy
+        trace = Ixx + Iyy
+        R = det - k * trace * trace                       # (B*N, 1, H, W)
+
+        # Downsample to feature-map resolution and keep only positive (corner) responses
+        R = F.avg_pool2d(R, 4, 4)                        # (B*N, 1, H/4, W/4)
+        R = R.clamp(min=0).view(b, n, R.shape[-2], R.shape[-1])
+        return R
+
+    def __shitomasi_response(self, images, window=3):
+        """
+        Shi-Tomasi (Good Features to Track) corner response for event voxels.
+
+        Uses λ_min of the structure tensor — strictly > 0 only when gradients are
+        significant in BOTH spatial directions, which means a true corner.
+        Edges (one large eigenvalue, one near-zero) give λ_min ≈ 0 and are rejected.
+        No k hyperparameter needed unlike Harris.
+
+        Args:
+            images: (B, N, bins, H, W) event voxels
+            window: local averaging window size for structure tensor
+        Returns:
+            (B, N, H/4, W/4) λ_min score map, clamped to [0, ∞)
+        """
+        b, n, bins, h, w = images.shape
+        img = images.abs().sum(dim=2).view(b * n, 1, h, w)
+
+        sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+                                dtype=img.dtype, device=img.device).view(1, 1, 3, 3) / 8.0
+        sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+                                dtype=img.dtype, device=img.device).view(1, 1, 3, 3) / 8.0
+
+        Ix = F.conv2d(img, sobel_x, padding=1)
+        Iy = F.conv2d(img, sobel_y, padding=1)
+
+        avg = torch.ones(1, 1, window, window, dtype=img.dtype, device=img.device) / (window * window)
+        Ixx = F.conv2d(Ix * Ix, avg, padding=window // 2)
+        Iyy = F.conv2d(Iy * Iy, avg, padding=window // 2)
+        Ixy = F.conv2d(Ix * Iy, avg, padding=window // 2)
+
+        trace = Ixx + Iyy
+        det   = Ixx * Iyy - Ixy * Ixy
+
+        # λ_min = 0.5 * (trace - sqrt(trace² - 4·det))
+        # clamp discriminant to avoid sqrt of negative (numerical noise)
+        discriminant = (trace * trace - 4.0 * det).clamp(min=0)
+        lam_min = 0.5 * (trace - discriminant.sqrt())
+
+        lam_min = F.avg_pool2d(lam_min, 4, 4)            # (B*N, 1, H/4, W/4)
+        lam_min = lam_min.clamp(min=0).view(b, n, lam_min.shape[-2], lam_min.shape[-1])
+        return lam_min
 
     def forward(self, images, patches_per_image=80, disps=None, return_color=False, scorer_eval_mode="multi", scorer_eval_use_grid=True):
         """
@@ -406,6 +505,29 @@ class Patchifier(nn.Module):
             scores = self.scorer(images)  # (B, N_frames, H/4, W/4)
             scores = torch.sigmoid(scores)  # Normalize to [0, 1]
 
+            # Optional corner guidance: multiply learned scores by Harris/Shi-Tomasi
+            # response so the scorer is biased toward trackable corners at both
+            # train and eval time.  The corner map is normalized per-frame to [0,1]
+            # so it acts as a soft mask rather than rescaling the score magnitude.
+            if self.corner_guidance == 'harris':
+                corner_map = self.__harris_response(images)          # (B, N, H/4, W/4)
+                corner_map = corner_map / (corner_map.amax(dim=(-2, -1), keepdim=True) + 1e-6)
+                if corner_map.shape != scores.shape:
+                    corner_map = F.interpolate(
+                        corner_map.view(-1, 1, *corner_map.shape[-2:]),
+                        size=scores.shape[-2:], mode='bilinear', align_corners=False
+                    ).view(scores.shape)
+                scores = scores * corner_map
+            elif self.corner_guidance == 'shitomasi':
+                corner_map = self.__shitomasi_response(images)       # (B, N, H/4, W/4)
+                corner_map = corner_map / (corner_map.amax(dim=(-2, -1), keepdim=True) + 1e-6)
+                if corner_map.shape != scores.shape:
+                    corner_map = F.interpolate(
+                        corner_map.view(-1, 1, *corner_map.shape[-2:]),
+                        size=scores.shape[-2:], mode='bilinear', align_corners=False
+                    ).view(scores.shape)
+                scores = scores * corner_map
+
             if self.training:
                 # Training: Sample 3x patches, then select top-scoring ones
                 # This provides supervision signal for the scorer network
@@ -434,6 +556,34 @@ class Patchifier(nn.Module):
 
                 x += 1  # Offset for boundary
                 y += 1
+
+        elif self.patch_selector == SelectionMethod.HARRIS:
+            # HARRIS: Bias towards corners via Harris corner response (no aperture problem)
+            g = self.__harris_response(images)  # (B, N_frames, H/4, W/4)
+
+            if self.training:
+                patch_selector_fn = PatchSelector("3xrandom")
+            else:
+                patch_selector_fn = PatchSelector(scorer_eval_mode, grid=scorer_eval_use_grid)
+
+            x, y = patch_selector_fn(g, patches_per_image)
+
+            x = x.clamp(min=1, max=w-2)
+            y = y.clamp(min=1, max=h-2)
+
+        elif self.patch_selector == SelectionMethod.SHITOMASI:
+            # SHITOMASI: Shi-Tomasi λ_min — strictly corner-only, no k hyperparameter
+            g = self.__shitomasi_response(images)  # (B, N_frames, H/4, W/4)
+
+            if self.training:
+                patch_selector_fn = PatchSelector("3xrandom")
+            else:
+                patch_selector_fn = PatchSelector(scorer_eval_mode, grid=scorer_eval_use_grid)
+
+            x, y = patch_selector_fn(g, patches_per_image)
+
+            x = x.clamp(min=1, max=w-2)
+            y = y.clamp(min=1, max=h-2)
 
         else:
             print(f"{self.patch_selector} not implemented")
@@ -573,7 +723,7 @@ class eVONet(nn.Module):
         norm: Event normalization method (default: "std2")
         randaug: Random augmentation during training
     """
-    def __init__(self, args, P=3, use_viewer=False, dim_inet=DIM, dim_fnet=128, dim=32, patch_selector=SelectionMethod.SCORER, norm="std2", randaug=False):
+    def __init__(self, args, P=3, use_viewer=False, dim_inet=DIM, dim_fnet=128, dim=32, patch_selector=SelectionMethod.SCORER, norm="std2", randaug=False, corner_guidance='none'):
         super(eVONet, self).__init__()
         self.P = P  # Patch size (3x3)
         self.dim_inet = dim_inet  # Context feature dimension (384)
@@ -583,7 +733,8 @@ class eVONet(nn.Module):
         # Patch extraction and feature encoding module
         self.patchify = Patchifier(args, patch_size=self.P, dim_inet=self.dim_inet,
                                   dim_fnet=self.dim_fnet, dim=dim,
-                                  patch_selector=patch_selector)
+                                  patch_selector=patch_selector,
+                                  corner_guidance=corner_guidance)
 
         # Recurrent update operator for optical flow prediction
         self.update = Update(self.P, self.dim_inet)
