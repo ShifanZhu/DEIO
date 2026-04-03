@@ -25,6 +25,8 @@ python script/debug/debug_score_map.py \
     --max-frames 10 \
     --frame-indices 0,5,9 \
     --tracker-selector topk
+
+conda run -n DEIO python /home/s  DEIO /repos/DEIO/script/debug/debug_score_map.py --network /home/s/repos/DEIO/checkpoints/tracker_base/070000.pth --config /home/s/repos/DEIO/config/vector.yaml --h5 /media/s/rell/tro/vector-processed/vector/board-slow/board-slow.h5 --output-dir results/debug_score_map/base  --tracker-selector topk
 """
 
 from __future__ import annotations
@@ -58,6 +60,7 @@ from script.eval_deio.track_h5_patches import (
     load_tracking_network,
     normalize_event_voxel,
     score_map_to_bgr,
+    select_adjacent_top1_patch_centers,
     select_patch_centers_native,
     select_topk_patch_centers,
     supported_track_mask,
@@ -303,6 +306,13 @@ def run_selection(
                 selector_use_grid=selector_use_grid,
                 coord_offset=1,
             )
+        elif args.tracker_selector == "adjacent_top1":
+            centers, values = select_adjacent_top1_patch_centers(
+                score_map,
+                num_patches=args.tracker_patches,
+                patch_radius=network.P // 2,
+                coord_offset=1,
+            )
         else:
             centers, values = select_topk_patch_centers(
                 score_map,
@@ -313,12 +323,20 @@ def run_selection(
         return centers, values, False, None
     except RuntimeError as exc:
         try:
-            centers, values = select_topk_patch_centers(
-                fallback_map,
-                num_patches=args.tracker_patches,
-                patch_radius=network.P // 2,
-                coord_offset=0,
-            )
+            if args.tracker_selector == "adjacent_top1":
+                centers, values = select_adjacent_top1_patch_centers(
+                    fallback_map,
+                    num_patches=args.tracker_patches,
+                    patch_radius=network.P // 2,
+                    coord_offset=0,
+                )
+            else:
+                centers, values = select_topk_patch_centers(
+                    fallback_map,
+                    num_patches=args.tracker_patches,
+                    patch_radius=network.P // 2,
+                    coord_offset=0,
+                )
             return centers, values, True, str(exc)
         except RuntimeError as fallback_exc:
             return None, None, True, f"{exc}; fallback failed: {fallback_exc}"
@@ -640,7 +658,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--tracker-selector",
-        choices=["native", "topk"],
+        choices=["native", "topk", "adjacent_top1"],
         default="native",
         help="Patch selection strategy to debug",
     )

@@ -21,15 +21,18 @@ class SelectionMethod(str, enum.Enum):
 class Scorer(nn.Module):
     def __init__(self, bins=5) -> None:
         super().__init__()
-        self.scorer = nn.Sequential(
+        self.backbone = nn.Sequential(
             nn.Conv2d(bins, 8, kernel_size=3),
             nn.ReLU(inplace=True),
             nn.Conv2d(8, 16, kernel_size=3),
             nn.ReLU(inplace=True),
-            nn.Conv2d(16, 32, kernel_size=3,),
+            nn.Conv2d(16, 32, kernel_size=3),
             nn.ReLU(inplace=True),
-            nn.Conv2d(32, 1, kernel_size=3),
-            nn.MaxPool2d(kernel_size=4, stride=4))
+        )
+        self.score_head = nn.Conv2d(32, 1, kernel_size=3)
+        self.info_gain_head = nn.Conv2d(32, 1, kernel_size=3)
+        self.conditioning_head = nn.Conv2d(32, 1, kernel_size=3)
+        self.pool = nn.MaxPool2d(kernel_size=4, stride=4)
         
         
         for m in self.modules():
@@ -40,13 +43,23 @@ class Scorer(nn.Module):
                     nn.init.constant_(m.weight, 1)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-    
-    def forward(self, x):
+
+    def forward_all(self, x):
         b, n, c1, h1, w1 = x.shape # voxels (batch,n_frames,bins,h,w)
         x = x.view(b*n, c1, h1, w1)
-        scores = self.scorer(x)
-        _, c2, h2, w2 = scores.shape
-        return scores.view(b, n, h2, w2)
+        feat = self.backbone(x)
+        outputs = {
+            "score": self.pool(self.score_head(feat)),
+            "info_gain": self.pool(self.info_gain_head(feat)),
+            "conditioning": self.pool(self.conditioning_head(feat)),
+        }
+        return {
+            name: value.view(b, n, value.shape[-2], value.shape[-1])
+            for name, value in outputs.items()
+        }
+    
+    def forward(self, x):
+        return self.forward_all(x)["score"]
         
 
 class PatchSelector():

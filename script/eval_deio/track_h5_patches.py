@@ -494,6 +494,77 @@ def select_topk_patch_centers(
     return centers, values.view(k)
 
 
+def select_adjacent_top1_patch_centers(
+    score_map: torch.Tensor,
+    num_patches: int,
+    patch_radius: int,
+    coord_offset: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pick one top-scoring center from each adjacent grid cell.
+
+    The valid feature map is partitioned into adjacent rectangular regions, and
+    each region contributes at most one patch: the local argmax inside that
+    region. This spreads the initialization set more aggressively than global
+    top-K while still preferring high-score locations.
+    """
+    score_map = torch.nan_to_num(score_map.float(), nan=0.0, posinf=0.0, neginf=0.0)
+    if not torch.isfinite(score_map).all():
+        raise RuntimeError("score map contains non-finite values")
+    if score_map.numel() == 0:
+        raise RuntimeError("empty score map")
+    if float(score_map.max().item() - score_map.min().item()) <= 1e-8:
+        raise RuntimeError("degenerate flat score map")
+
+    h, w = score_map.shape
+    x0, x1 = patch_radius, w - patch_radius
+    y0, y1 = patch_radius, h - patch_radius
+    valid_w = x1 - x0
+    valid_h = y1 - y0
+    if valid_w <= 0 or valid_h <= 0:
+        raise RuntimeError("No valid patch locations remain after boundary masking")
+
+    cols = max(1, int(round(math.sqrt(num_patches * valid_w / max(valid_h, 1)))))
+    cols = min(cols, max(1, valid_w), max(1, num_patches))
+    rows = max(1, int(math.ceil(num_patches / cols)))
+    rows = min(rows, max(1, valid_h))
+
+    x_edges = torch.linspace(x0, x1, cols + 1, device=score_map.device)
+    y_edges = torch.linspace(y0, y1, rows + 1, device=score_map.device)
+
+    candidates: list[tuple[float, int, int]] = []
+    for row in range(rows):
+        ys = int(round(float(y_edges[row].item())))
+        ye = int(round(float(y_edges[row + 1].item())))
+        ys = max(y0, min(ys, y1))
+        ye = max(ys + 1, min(ye, y1))
+        for col in range(cols):
+            xs = int(round(float(x_edges[col].item())))
+            xe = int(round(float(x_edges[col + 1].item())))
+            xs = max(x0, min(xs, x1))
+            xe = max(xs + 1, min(xe, x1))
+            cell = score_map[ys:ye, xs:xe]
+            if cell.numel() == 0:
+                continue
+            flat_idx = int(torch.argmax(cell).item())
+            cell_w = cell.shape[1]
+            dy = flat_idx // cell_w
+            dx = flat_idx % cell_w
+            y = ys + dy
+            x = xs + dx
+            candidates.append((float(score_map[y, x].item()), x, y))
+
+    if not candidates:
+        raise RuntimeError("No valid patch locations found in adjacent-area selection")
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    kept = candidates[: min(num_patches, len(candidates))]
+    values = torch.tensor([item[0] for item in kept], device=score_map.device, dtype=torch.float32)
+    x = torch.tensor([item[1] for item in kept], device=score_map.device, dtype=torch.long).view(1, -1)
+    y = torch.tensor([item[2] for item in kept], device=score_map.device, dtype=torch.long).view(1, -1)
+    centers = torch.stack([x + coord_offset, y + coord_offset], dim=-1).float()
+    return centers, values
+
+
 def select_patch_centers_native(
     score_map: torch.Tensor,
     num_patches: int,
@@ -524,6 +595,10 @@ def build_fallback_score_map(
     surface first; if that is still flat, fall back to feature magnitude.
     """
     bins = voxel.shape[0]
+    # Stage 1: build a simple event-native saliency map by weighting later bins
+    # more heavily than earlier ones, then summing across time. This acts like a
+    # temporally weighted event surface and usually preserves recent structure
+    # better than plain activity on sparse event frames.
     bin_weights = torch.linspace(0.0, 1.0, bins, device=voxel.device, dtype=torch.float32)
     weighted = (voxel.float() * bin_weights[:, None, None]).sum(dim=0, keepdim=True).unsqueeze(0)
     weighted = torch.nn.functional.interpolate(
@@ -536,6 +611,9 @@ def build_fallback_score_map(
     if float(weighted.max().item() - weighted.min().item()) > 1e-8:
         return weighted
 
+    # Stage 2: if the weighted event map is effectively flat, fall back to the
+    # dense feature-map magnitude. This is not the learned scorer; it is only a
+    # backup saliency signal so patch selection can still proceed.
     fmap_score = fmap[0, 0].float().pow(2).sum(dim=0).sqrt()
     fmap_score = torch.nan_to_num(fmap_score, nan=0.0, posinf=0.0, neginf=0.0)
     return fmap_score
@@ -1190,6 +1268,13 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
                         selector_use_grid=runtime_cfg.SCORER_EVAL_USE_GRID,
                         coord_offset=1,
                     )
+                elif args.tracker_selector == "adjacent_top1":
+                    centers, score_vals = select_adjacent_top1_patch_centers(
+                        scores[0, 0],
+                        num_patches=args.tracker_patches,
+                        patch_radius=network.P // 2,
+                        coord_offset=1,
+                    )
                 else:
                     centers, score_vals = select_topk_patch_centers(
                         scores[0, 0],
@@ -1200,12 +1285,20 @@ def run_tracker_only(h5_path: Path, runtime_cfg, args, out_root: Path, network) 
             except RuntimeError as exc:
                 activity_scores = build_fallback_score_map(voxel, fmap, feat_h, feat_w)
                 try:
-                    centers, score_vals = select_topk_patch_centers(
-                        activity_scores,
-                        num_patches=args.tracker_patches,
-                        patch_radius=network.P // 2,
-                        coord_offset=0,
-                    )
+                    if args.tracker_selector == "adjacent_top1":
+                        centers, score_vals = select_adjacent_top1_patch_centers(
+                            activity_scores,
+                            num_patches=args.tracker_patches,
+                            patch_radius=network.P // 2,
+                            coord_offset=0,
+                        )
+                    else:
+                        centers, score_vals = select_topk_patch_centers(
+                            activity_scores,
+                            num_patches=args.tracker_patches,
+                            patch_radius=network.P // 2,
+                            coord_offset=0,
+                        )
                     print(f"Frame {frame_idx}: using activity fallback because scorer selection failed ({exc})")
                 except RuntimeError:
                     print(f"Skipping frame {frame_idx}: {exc}")
@@ -1715,9 +1808,9 @@ def main():
     )
     parser.add_argument(
         "--tracker-selector",
-        choices=["native", "topk"],
+        choices=["native", "topk", "adjacent_top1"],
         default="native",
-        help="Patch initialization strategy: native PatchSelector from config, or global top-K scorer peaks",
+        help="Patch initialization strategy: native PatchSelector from config, global top-K scorer peaks, or one local top score per adjacent grid cell",
     )
     parser.add_argument(
         "--reinit-every",

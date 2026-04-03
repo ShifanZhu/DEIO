@@ -341,6 +341,8 @@ class Patchifier(nn.Module):
         self.dim_fnet = dim_fnet  # Dimension for matching features (correlation)
         self.patch_selector = patch_selector.lower()
         self.corner_guidance = corner_guidance.lower()  # 'none' | 'harris' | 'shitomasi'
+        self.last_scorer_context = None
+        self.last_dense_features = None
 
         # Feature extractors for event voxel grids
         # Two separate encoders extract different feature representations
@@ -361,6 +363,13 @@ class Patchifier(nn.Module):
         # Predicts importance scores for each spatial location
         if self.patch_selector == SelectionMethod.SCORER:
             self.scorer = Scorer(5)  # Input: 5-channel event voxel grid
+
+    @staticmethod
+    def _select_map_values(map_tensor, coords):
+        x = coords[..., 0].long().clamp(0, map_tensor.shape[-1] - 1)
+        y = coords[..., 1].long().clamp(0, map_tensor.shape[-2] - 1)
+        frame_idx = torch.arange(map_tensor.shape[1], device=map_tensor.device).view(-1, 1).expand_as(x)
+        return map_tensor[0, frame_idx, y, x]
 
     def __event_gradient(self, images):
         """
@@ -492,7 +501,7 @@ class Patchifier(nn.Module):
 
         mode = (self.corner_guidance if corner_guidance is None else corner_guidance).lower()
 
-        scores = torch.sigmoid(self.scorer(images))
+        scores = torch.sigmoid(self.scorer.forward_all(images)["score"])
         corner_map = None
 
         if mode == 'harris':
@@ -543,9 +552,15 @@ class Patchifier(nn.Module):
         # Extract dense feature maps at 1/4 resolution
         fmap = self.fnet(images) / 4.0  # (B, N_frames, 128, H/4, W/4)
         imap = self.inet(images) / 4.0  # (B, N_frames, 384, H/4, W/4)
+        self.last_dense_features = {
+            "fmap": fmap.detach(),
+            "imap_dense": imap.detach(),
+        }
 
         b, n, c, h, w = fmap.shape  # n = number of frames
         P = self.patch_size
+
+        self.last_scorer_context = None
 
         # ==== PATCH SELECTION STRATEGIES ====
         # Select informative patches using one of three methods:
@@ -574,8 +589,12 @@ class Patchifier(nn.Module):
         elif self.patch_selector == SelectionMethod.SCORER:
             # SCORER: Learned patch importance network (Paper Section III-B, L_score)
             # This is the default and best-performing method
-            scores = self.scorer(images)  # (B, N_frames, H/4, W/4)
-            scores = torch.sigmoid(scores)  # Normalize to [0, 1]
+            scorer_outputs = self.scorer.forward_all(images)
+            score_logits = scorer_outputs["score"]  # (B, N_frames, H/4, W/4)
+            aux_logits = {k: v for k, v in scorer_outputs.items() if k != "score"}
+            scores = torch.sigmoid(score_logits)  # Normalize to [0, 1]
+            selection_coords = None
+            selected_score_logits = None
 
             # Optional corner guidance: multiply learned scores by Harris/Shi-Tomasi
             # response so the scorer is biased toward trackable corners at both
@@ -609,13 +628,17 @@ class Patchifier(nn.Module):
                 coords = torch.stack([x, y], dim=-1).float()  # (N_frames, 3*patches_per_image, 2)
                 # Extract scores at sampled locations
                 scores = altcorr.patchify(scores[0,:,None], coords, 0).view(n, 3 * patches_per_image)
+                score_logits_sampled = altcorr.patchify(score_logits[0,:,None], coords, 0).view(n, 3 * patches_per_image)
 
                 # Sort by score and keep top patches_per_image
                 vx, ix = torch.sort(scores, dim=1)
+                keep = ix[:, -patches_per_image:]
+                selection_coords = torch.gather(coords, 1, keep[..., None].expand(-1, -1, 2))
+                selected_score_logits = torch.gather(score_logits_sampled, 1, keep)
                 x = x + 1  # Offset for boundary
                 y = y + 1
-                x = torch.gather(x, 1, ix[:, -patches_per_image:])  # Top scoring patches
-                y = torch.gather(y, 1, ix[:, -patches_per_image:])
+                x = torch.gather(x, 1, keep)  # Top scoring patches
+                y = torch.gather(y, 1, keep)
                 scores = vx[:, -patches_per_image:].contiguous().view(n, patches_per_image)
 
             else:
@@ -623,8 +646,10 @@ class Patchifier(nn.Module):
                 patch_selector_fn = PatchSelector(scorer_eval_mode, grid=scorer_eval_use_grid)
                 x, y = patch_selector_fn(scores, patches_per_image)
                 coords = torch.stack([x, y], dim=-1).float()
+                selection_coords = coords.clone()
                 # Extract score values at selected locations
                 scores = altcorr.patchify(scores[0,:,None], coords, 0).view(n, patches_per_image)
+                selected_score_logits = altcorr.patchify(score_logits[0,:,None], coords, 0).view(n, patches_per_image)
 
                 x += 1  # Offset for boundary
                 y += 1
@@ -693,6 +718,25 @@ class Patchifier(nn.Module):
         index = torch.arange(n, device="cuda").view(n, 1)  # [N_frames, 1]
         index = index.repeat(1, patches_per_image).reshape(-1)  # [N_frames * patches_per_image]
         # E.g., [0,0,...,0, 1,1,...,1, ..., 14,14,...,14] where each value repeats patches_per_image times
+
+        if self.patch_selector == SelectionMethod.SCORER:
+            aux_selected = {}
+            if selection_coords is not None:
+                for name, aux_map in aux_logits.items():
+                    aux_selected[name] = self._select_map_values(aux_map, selection_coords)
+
+            self.last_scorer_context = {
+                "images": images,
+                "score_logits_map": score_logits,
+                "score_maps": scores if scores.ndim == 4 else torch.sigmoid(score_logits),
+                "selected_score_logits": selected_score_logits,
+                "selected_score_coords": selection_coords,
+                "patches": patches,
+                "ix": index,
+                "aux_logits_maps": aux_logits,
+                "aux_selected_logits": aux_selected,
+                "scorer_module": self.scorer,
+            }
 
         # Return appropriate outputs based on mode
         if self.training:
