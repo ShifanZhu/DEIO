@@ -169,20 +169,29 @@ class PatchTracker(nn.Module):
             return endpoints.new_empty((0,))
 
         runs, num_patches, _ = endpoints.shape
-        spread = endpoints.new_full((num_patches,), float("inf"))
         if runs < 2:
             return endpoints.new_zeros((num_patches,))
 
-        for patch_idx in range(num_patches):
-            keep = valid[:, patch_idx]
-            if int(keep.sum().item()) < 2:
-                continue
-            pts = endpoints[keep, patch_idx]
-            dmat = torch.cdist(pts, pts)
-            triu = torch.triu_indices(dmat.shape[0], dmat.shape[1], offset=1, device=dmat.device)
-            spread[patch_idx] = dmat[triu[0], triu[1]].mean()
+        # Permute to (num_patches, runs, 2) for batched cdist
+        ep = endpoints.permute(1, 0, 2).float()  # (num_patches, runs, 2)
+        v = valid.permute(1, 0)                  # (num_patches, runs)
+
+        # All pairwise distances: (num_patches, runs, runs)
+        dmat = torch.cdist(ep, ep)
+
+        # Upper-triangle valid-pair mask: both endpoints must be from valid runs
+        triu_mask = torch.ones(runs, runs, device=endpoints.device, dtype=torch.bool).triu(diagonal=1)
+        pair_valid = (v.unsqueeze(2) & v.unsqueeze(1)) & triu_mask.unsqueeze(0)
+
+        pair_count = pair_valid.sum(dim=(1, 2)).float()   # (num_patches,)
+        dist_sum = (dmat * pair_valid).sum(dim=(1, 2))    # (num_patches,)
+
+        spread = endpoints.new_full((num_patches,), float("inf"))
+        has_pairs = pair_count > 0
+        spread[has_pairs] = dist_sum[has_pairs] / pair_count[has_pairs]
         return spread
 
+    @torch.no_grad()
     @autocast(enabled=False)
     def compute_replay_metrics(self, images, *, horizon=2, replay_steps=4, replay_runs=3):
         """Compute replay-based patch reliability metrics from the last forward selection."""
@@ -400,6 +409,9 @@ class PatchTracker(nn.Module):
 
         # ── Step 5: iterative tracking loop ─────────────────────────────────
         traj = []
+        _edges_dirty = True
+        _cached_gt_center = None
+        _cached_valid = None
 
         while len(traj) < STEPS:
             coords_est = coords_est.detach()
@@ -407,6 +419,7 @@ class PatchTracker(nn.Module):
             # incremental frame addition (matches eVONet logic, minus BA depth init)
             n = ii.max().item() + 1
             if len(traj) >= 8 and n < N:
+                _edges_dirty = True
                 # edges: existing patches → new frame
                 kk1, jj1 = flatmeshgrid(
                     torch.where(ix < n)[0],
@@ -454,19 +467,21 @@ class PatchTracker(nn.Module):
             dij = (ii - jj).abs()
             k = (dij > 0) & (dij <= 2)
 
-            # compute GT reprojection for close edges
-            coords_gt, valid = pops.transform(
-                Ps, patches_gt, intrinsics, ii[k], jj[k], kk[k], valid=True)
-            # coords_gt: (B, close_edges, P, P, 2) → take center pixel
-            coords_gt_center = coords_gt[..., p // 2, p // 2, :]  # (B, close_edges, 2)
+            # compute GT reprojection only when the edge set changed
+            if _edges_dirty:
+                coords_gt, valid = pops.transform(
+                    Ps, patches_gt, intrinsics, ii[k], jj[k], kk[k], valid=True)
+                _cached_gt_center = coords_gt[..., p // 2, p // 2, :]  # (B, close_edges, 2)
+                _cached_valid = valid
+                _edges_dirty = False
 
             traj.append((
-                coords_est[:, k],    # (B, close_edges, 2)
-                coords_gt_center,    # (B, close_edges, 2)
-                valid,               # (B, close_edges) float validity mask
-                weight[:, k],        # (B, close_edges, 2)
-                scores,              # (N_frames, patches_per_image) or None
-                kk[k],               # (close_edges,) patch indices into scores.view(-1)
+                coords_est[:, k],      # (B, close_edges, 2)
+                _cached_gt_center,     # (B, close_edges, 2)
+                _cached_valid,         # (B, close_edges) float validity mask
+                weight[:, k],          # (B, close_edges, 2)
+                scores,                # (N_frames, patches_per_image) or None
+                kk[k],                 # (close_edges,) patch indices into scores.view(-1)
             ))
 
         return traj

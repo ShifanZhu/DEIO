@@ -850,16 +850,18 @@ def _replay_objective(
         return scorer_objective_rank_only(coords_est, coords_gt, valid, weight, scores, kk_close, args, scorer_context)
 
     patch_logits = _selected_patch_logits(stats, scorer_context)
+    # replay_valid gates invalid patches; use fb_score^2 to amplify corner preference
+    # over patch_utility (which doesn't specifically discriminate corners from edges)
     target = stats.patch_utility.detach() * replay_valid.detach()
 
     fb_score = torch.ones_like(target)
     rep_score = torch.ones_like(target)
     if use_fb:
-        tau_fb = max(float(getattr(args, "score_cycle_tau_fb", 1.5)), EPS)
+        tau_fb = max(float(getattr(args, "score_cycle_tau_fb", 0.5)), EPS)
         fb_score = torch.zeros_like(target)
         finite_fb = torch.isfinite(fb_error)
         fb_score[finite_fb] = torch.exp(-fb_error[finite_fb].detach() / tau_fb)
-        target = target * fb_score
+        target = target * fb_score ** 2 # square to amplify preference for low fb error patches
     if use_stability:
         tau_rep = max(float(getattr(args, "score_cycle_tau_rep", 1.0)), EPS)
         rep_score = torch.zeros_like(target)
@@ -877,12 +879,21 @@ def _replay_objective(
         bottom_q=float(args.score_rank_bottom_quantile),
     )
 
-    total = rank_loss
+    # Entropy regularisation: prevents scorer collapse to zero when replay_valid is sparse
+    # early in training and the teacher loss pulls all scores toward zero.
+    # Spatially blind — pushes all scores toward 0.5 equally, does not interfere with
+    # the rank loss creating corner-vs-edge spatial preference.
+    s = torch.sigmoid(patch_logits)
+    entropy_reg = -(s * torch.log(s.clamp(min=EPS)) +
+                    (1 - s) * torch.log((1 - s).clamp(min=EPS))).mean()
+    entropy_weight = float(getattr(args, "score_entropy_weight", 0.1))
+    total = rank_loss + entropy_weight * entropy_reg
     metrics = {
         **rank_metrics,
         "scorer/utility_mean_train": float(target.mean().item()),
         "scorer/valid_patch_fraction_train": float(stats.patch_valid_fraction.mean().detach().item()),
         "scorer/replay_valid_fraction_train": float(replay_valid.mean().detach().item()),
+        "scorer/entropy_reg_train": float(entropy_reg.detach().item()),
     }
     if use_fb:
         finite_fb = torch.isfinite(fb_error)
@@ -895,10 +906,14 @@ def _replay_objective(
             stability_error[finite_rep].mean().item() if finite_rep.any() else float("nan")
         )
 
-    teacher = _selected_event_teacher(scorer_context)
     teacher_weight = _teacher_warmup_weight(args, scorer_context)
-    if teacher is not None and teacher_weight > 0.0:
-        teacher_loss = F.smooth_l1_loss(torch.sigmoid(patch_logits), teacher.detach())
+    if teacher_weight > 0.0:
+        # Data-driven teacher: GRU-derived patch utility = exp(-tracking_error/tau) * confidence
+        # Improves alongside the tracker — no hand-crafted corner bias that fails on event data.
+        # Early training: utility ~uniform (bad tracker) → no wrong spatial prior imposed.
+        # Later training: utility higher at corners/texture → correct bias emerges from data.
+        teacher = stats.patch_utility.detach()
+        teacher_loss = F.smooth_l1_loss(torch.sigmoid(patch_logits), teacher)
         total = total + teacher_weight * teacher_loss
         metrics["scorer/teacher_alignment_train"] = float(teacher_loss.detach().item())
         metrics["scorer/teacher_weight_train"] = float(teacher_weight)

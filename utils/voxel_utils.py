@@ -54,14 +54,9 @@ def rescale(voxs, sequence=True):
 
 
 def evs2rgb(voxs):
-    pos_voxs = voxs.clone()
-    neg_voxs = voxs.clone()
-    pos_voxs[voxs < 0.0] = 0.0
-    neg_voxs[voxs > 0.0] = 0.0
-    # [DEBUG]
-    assert pos_voxs.min().item() >= 0.0 and pos_voxs.max().item() <= 1.0
-    assert neg_voxs.max().item() <= 0.0 and neg_voxs.min().item() >= -1.0
-    neg_voxs *= -1.0
+    pos_voxs = voxs.clamp(min=0.0, max=1.0)   # clamp handles fp precision after rescale
+    neg_voxs = voxs.clamp(min=-1.0, max=0.0)
+    neg_voxs = (-neg_voxs)
     green_channel = torch.zeros_like(pos_voxs)
     rgb_images = torch.stack((neg_voxs, green_channel, pos_voxs), dim=-3)
     return rgb_images

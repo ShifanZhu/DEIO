@@ -28,6 +28,7 @@ class GatedResidual(nn.Module):
     def forward(self, x):
         return x + self.gate(x) * self.res(x)
 
+@torch._dynamo.disable
 class SoftAgg(nn.Module):
     def __init__(self, dim=512, expand=True):
         super(SoftAgg, self).__init__()
@@ -44,9 +45,10 @@ class SoftAgg(nn.Module):
 
         if self.expand:
             return self.h(y)[:,jx]
-            
+
         return self.h(y)
 
+@torch._dynamo.disable
 class SoftAggBasic(nn.Module):
     def __init__(self, dim=512, expand=True):
         super(SoftAggBasic, self).__init__()
@@ -63,7 +65,7 @@ class SoftAggBasic(nn.Module):
 
         if self.expand:
             return self.h(y)[:,jx]
-            
+
         return self.h(y)
 
 

@@ -584,10 +584,12 @@ def train(rank, args):
         sampler = torch.utils.data.distributed.DistributedSampler(
             db, shuffle=True, num_replicas=args.gpu_num, rank=rank)
         train_loader = DataLoader(db, batch_size=args.batch, sampler=sampler,
-                                  num_workers=args.num_workers, pin_memory=True, prefetch_factor=4)
+                                  num_workers=args.num_workers, pin_memory=True, prefetch_factor=4,
+                                  persistent_workers=True)
     else:
         train_loader = DataLoader(db, batch_size=args.batch, shuffle=True,
-                                  num_workers=args.num_workers, pin_memory=True, prefetch_factor=4)
+                                  num_workers=args.num_workers, pin_memory=True, prefetch_factor=4,
+                                  persistent_workers=True)
 
     # ── Network ───────────────────────────────────────────────────────────────
     net = PatchTracker(
@@ -602,6 +604,7 @@ def train(rank, args):
     )
     net.train()
     net.cuda()
+    net = torch.compile(net, dynamic=True)
 
     if args.ddp:
         net = DDP(net, device_ids=[rank], find_unused_parameters=False)
@@ -638,7 +641,7 @@ def train(rank, args):
             offset += len(sub_db)
         val_subset = torch.utils.data.Subset(val_db, one_per_seq)
         val_loader = DataLoader(val_subset, batch_size=1, shuffle=False,
-                                num_workers=2, pin_memory=True)
+                                num_workers=2, pin_memory=True, persistent_workers=True)
 
     # ── Optimizer ─────────────────────────────────────────────────────────────
     optimizer = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-6)
@@ -875,6 +878,8 @@ if __name__ == '__main__':
                         help='temperature for forward-backward replay error utility')
     parser.add_argument('--score_cycle_tau_rep', type=float, default=1.0,
                         help='temperature for replay-stability utility')
+    parser.add_argument('--score_entropy_weight', type=float, default=0.1,
+                        help='weight for entropy regularisation to prevent scorer collapse to zero')
 
     parser.add_argument('--patches_per_image', type=int, default=80)
     parser.add_argument('--patch_selector', type=str, default='scorer')
