@@ -591,8 +591,14 @@ class Patchifier(nn.Module):
             # This is the default and best-performing method
             scorer_outputs = self.scorer.forward_all(images)
             score_logits = scorer_outputs["score"]  # (B, N_frames, H/4, W/4)
-            aux_logits = {k: v for k, v in scorer_outputs.items() if k != "score"}
+            aux_logits = {k: v for k, v in scorer_outputs.items() if k not in ("score", "density")}
             scores = torch.sigmoid(score_logits)  # Normalize to [0, 1]
+
+            # Multiply scores by event density: suppresses sparse noise pixels
+            # (isolated events → density≈0 → score≈0 → never selected).
+            # Logits are kept clean for loss computation.
+            if "density" in scorer_outputs:
+                scores = scores * scorer_outputs["density"]
             selection_coords = None
             selected_score_logits = None
 

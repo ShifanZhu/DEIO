@@ -880,6 +880,8 @@ if __name__ == '__main__':
                         help='temperature for replay-stability utility')
     parser.add_argument('--score_entropy_weight', type=float, default=0.1,
                         help='weight for entropy regularisation to prevent scorer collapse to zero')
+    parser.add_argument('--score_tv_weight', type=float, default=0.0,
+                        help='weight for total variation regularization on dense scorer map')
 
     parser.add_argument('--patches_per_image', type=int, default=80)
     parser.add_argument('--patch_selector', type=str, default='scorer')

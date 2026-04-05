@@ -21,18 +21,28 @@ class SelectionMethod(str, enum.Enum):
 class Scorer(nn.Module):
     def __init__(self, bins=5) -> None:
         super().__init__()
+        # Padded convolutions preserve spatial dims; dilated layers increase
+        # receptive field from ~12px to ~25px so the network can distinguish
+        # corners (2-D constraint) from edges (1-D, aperture problem).
         self.backbone = nn.Sequential(
-            nn.Conv2d(bins, 8, kernel_size=3),
+            nn.Conv2d(bins, 16, kernel_size=3, padding=1),
+            nn.GroupNorm(4, 16),
             nn.ReLU(inplace=True),
-            nn.Conv2d(8, 16, kernel_size=3),
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.GroupNorm(8, 32),
             nn.ReLU(inplace=True),
-            nn.Conv2d(16, 32, kernel_size=3),
+            nn.Conv2d(32, 32, kernel_size=3, padding=2, dilation=2),
+            nn.GroupNorm(8, 32),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 32, kernel_size=3, padding=4, dilation=4),
+            nn.GroupNorm(8, 32),
             nn.ReLU(inplace=True),
         )
-        self.score_head = nn.Conv2d(32, 1, kernel_size=3)
-        self.info_gain_head = nn.Conv2d(32, 1, kernel_size=3)
-        self.conditioning_head = nn.Conv2d(32, 1, kernel_size=3)
-        self.pool = nn.MaxPool2d(kernel_size=4, stride=4)
+        self.score_head = nn.Conv2d(32, 1, kernel_size=1)
+        self.info_gain_head = nn.Conv2d(32, 1, kernel_size=1)
+        self.conditioning_head = nn.Conv2d(32, 1, kernel_size=1)
+        # AvgPool for spatial smoothing instead of MaxPool picking noisiest pixel
+        self.pool = nn.AvgPool2d(kernel_size=4, stride=4)
         
         
         for m in self.modules():
@@ -47,11 +57,24 @@ class Scorer(nn.Module):
     def forward_all(self, x):
         b, n, c1, h1, w1 = x.shape # voxels (batch,n_frames,bins,h,w)
         x = x.view(b*n, c1, h1, w1)
+
+        # Polarity-invariant: both sides of a moving edge have the same event
+        # density magnitude; only corner vs edge geometry matters for scoring.
+        x = x.abs()
+
+        # Event density mask: sum abs over temporal bins → pool → normalize [0,1].
+        # Used to suppress sparse noise pixels (isolated events in background).
+        density = x.sum(dim=1, keepdim=True)   # (b*n, 1, H, W)
+        density = self.pool(density)            # (b*n, 1, H/4, W/4)
+        density = density / density.amax(dim=(-2, -1), keepdim=True).clamp(min=1e-6)
+        density = density.squeeze(1)            # (b*n, H/4, W/4) — matches other outputs
+
         feat = self.backbone(x)
         outputs = {
             "score": self.pool(self.score_head(feat)),
             "info_gain": self.pool(self.info_gain_head(feat)),
             "conditioning": self.pool(self.conditioning_head(feat)),
+            "density": density,
         }
         return {
             name: value.view(b, n, value.shape[-2], value.shape[-1])

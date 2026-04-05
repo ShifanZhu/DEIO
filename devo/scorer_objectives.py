@@ -906,6 +906,17 @@ def _replay_objective(
             stability_error[finite_rep].mean().item() if finite_rep.any() else float("nan")
         )
 
+    # TV regularization on dense score logits map: penalizes large differences
+    # between neighboring pixels to encourage spatially smooth score maps.
+    tv_weight = float(getattr(args, "score_tv_weight", 0.0))
+    if tv_weight > 0.0 and scorer_context is not None and scorer_context.score_logits_map is not None:
+        logits_map = scorer_context.score_logits_map.float()
+        tv_h = (logits_map[..., 1:, :] - logits_map[..., :-1, :]).pow(2).mean()
+        tv_w = (logits_map[..., :, 1:] - logits_map[..., :, :-1]).pow(2).mean()
+        tv_loss = tv_h + tv_w
+        total = total + tv_weight * tv_loss
+        metrics["scorer/tv_loss_train"] = float(tv_loss.detach().item())
+
     teacher_weight = _teacher_warmup_weight(args, scorer_context)
     if teacher_weight > 0.0:
         # Data-driven teacher: GRU-derived patch utility = exp(-tracking_error/tau) * confidence
